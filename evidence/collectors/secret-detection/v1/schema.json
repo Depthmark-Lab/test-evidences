@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "secret-detection v1",
+  "description": "Secrets found in the files of a commit. Says where each secret is, never what it is",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["result", "commit", "scanner", "path", "verification", "summary", "findings"],
+  "properties": {
+    "result": {"enum": ["pass", "fail"], "description": "fail when any secret is found"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "path": {"type": "string", "minLength": 1, "description": "What was scanned, relative to the workspace"},
+    "verification": {"type": "boolean", "description": "Whether the scanner asked each provider if the secret works"},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "verified", "unverified", "unknown"],
+      "properties": {
+        "total": {"type": "integer"},
+        "verified": {"type": "integer"},
+        "unverified": {"type": "integer"},
+        "unknown": {"type": "integer"}
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Where each secret is. There is deliberately no field that could hold the secret",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["detector", "file", "line", "verification"],
+        "properties": {
+          "detector": {"type": "string", "minLength": 1},
+          "file": {"type": "string"},
+          "line": {"type": "integer"},
+          "verification": {"enum": ["verified", "unverified", "unknown"]}
+        }
+      }
+    }
+  }
+}

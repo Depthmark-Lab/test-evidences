@@ -1,0 +1,47 @@
+{
+  "peer-approval": {
+    "description": "Who approved the pull request that produced this commit",
+    "family": "approval",
+    "current": "v1",
+    "env": ["GH_TOKEN"]
+  },
+  "code-quality-gate": {
+    "description": "SonarQube quality gate of the analysis of this exact commit",
+    "family": "scan",
+    "current": "v1",
+    "params": {
+      "sonar-project-key": {"required": true, "description": "SonarQube project key"}
+    },
+    "secrets": {
+      "SONAR_TOKEN": {"path": "kv/data/evidence/sonarqube", "field": "token"}
+    }
+  },
+  "secret-detection": {
+    "description": "Secrets TruffleHog finds in the files of this commit. Records where they are, never the secrets",
+    "family": "scan",
+    "current": "v1",
+    "timeout": 900,
+    "params": {
+      "secrets-path": {"required": false, "description": "Directory to scan, relative to the workspace (default .)"},
+      "secrets-verify": {"required": false, "description": "true to ask each provider whether a secret found works (default false)"}
+    }
+  },
+  "sca": {
+    "description": "Known vulnerabilities in the dependencies of this commit, found by Grype",
+    "family": "scan",
+    "current": "v1",
+    "timeout": 900,
+    "params": {
+      "sca-target": {"required": false, "description": "dir:<path> or sbom:<file> to scan (default dir:.)"},
+      "sca-fail-on": {"required": false, "description": "Lowest severity that makes the result fail: critical, high, medium, low or negligible (default high)"}
+    }
+  },
+  "custom": {
+    "description": "Anything a squad wants to declare itself. Signed with the self key, never platform-verified",
+    "family": "self",
+    "current": "v1",
+    "params": {
+      "predicate-file": {"required": true, "description": "Path to a file that holds one JSON object"}
+    }
+  }
+}

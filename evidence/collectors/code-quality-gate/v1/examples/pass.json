@@ -1,0 +1,11 @@
+{
+  "result": "pass",
+  "server": "https://sonarqube.acme-bank.example",
+  "projectKey": "acme-bank_payments",
+  "analysisId": "AX-1",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "OK",
+  "conditions": [
+    {"status": "OK", "metricKey": "new_coverage", "comparator": "LT", "errorThreshold": "80", "actualValue": "91.2"}
+  ]
+}

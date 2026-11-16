@@ -1,0 +1,163 @@
+# The evidence workflow, and the trust boundary of the lab.
+#
+# Vault's evidence-<family>-lab roles trust this file by job_workflow_ref, so
+# only a job of this workflow can sign. It runs in two jobs:
+#   collect  runs the collectors and the scanners, without id-token permission,
+#            so nothing it runs can request a signing token.
+#   sign     checks each predicate again and signs it with Vault Transit, which
+#            holds the private keys. It runs no collector and no scanner.
+# The signed DSSE envelopes are uploaded as the artifact `evidence-envelopes`.
+#
+# Lab only: the kit is checked out from this repository at the caller's commit,
+# so callers must live in this repository. A caller elsewhere fails at that
+# checkout. The production kit pins its action by version instead.
+name: evidence
+
+on:
+  workflow_call:
+    inputs:
+      types:
+        description: Comma-separated evidence type ids
+        required: true
+        type: string
+      subject-repo-path:
+        description: Name of the artifact in the statement, as <repository>/<path to artifact>
+        required: true
+        type: string
+      subject-sha256:
+        description: SHA-256 of the artifact
+        required: true
+        type: string
+      params:
+        description: Collector parameters, one name=value per line
+        required: false
+        type: string
+        default: ""
+      source-artifact:
+        description: Artifact that holds the files to scan. Empty to scan the caller's repository at its commit
+        required: false
+        type: string
+        default: ""
+      enforce:
+        description: Fail when a check's result is "fail". The evidence is still signed
+        required: false
+        type: boolean
+        default: false
+      runs-on:
+        description: Runner labels, as a JSON list
+        required: false
+        type: string
+        default: '["self-hosted", "talos", "lab"]'
+
+permissions: {}
+
+jobs:
+  collect:
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out the kit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Depthmark-Lab/test-evidences
+          ref: ${{ github.workflow_sha }}
+          path: .evidence-kit
+          persist-credentials: false
+
+      - name: Check out the code to scan
+        if: inputs.source-artifact == ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          persist-credentials: false
+
+      - name: Download the files to scan
+        if: inputs.source-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.source-artifact }}
+          path: source
+
+      - name: Install the scanners
+        run: .evidence-kit/scripts/install-scanners.sh "$RUNNER_TEMP/scanners/bin"
+
+      - name: Collect
+        id: collect
+        working-directory: source
+        env:
+          # Inputs travel as environment variables, never interpolated into the script.
+          EVD_IN_TYPES: ${{ inputs.types }}
+          EVD_IN_PARAMS: ${{ inputs.params }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          args=(collect --types "$EVD_IN_TYPES" --out "$RUNNER_TEMP/predicates")
+          while IFS= read -r line; do
+            if [ -n "${line//[[:space:]]/}" ]; then args+=(--param "$line"); fi
+          done <<<"$EVD_IN_PARAMS"
+          # A type that cannot be collected must not stop the others from being signed.
+          code=0
+          python3 "$GITHUB_WORKSPACE/.evidence-kit/evidence/cli.py" "${args[@]}" || code=$?
+          echo "code=$code" >>"$GITHUB_OUTPUT"
+
+      - name: Hand the predicates to the sign job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence-predicates
+          path: ${{ runner.temp }}/predicates
+          if-no-files-found: ignore
+          retention-days: 1
+          overwrite: true
+
+      - name: Fail if a type could not be collected
+        if: steps.collect.outputs.code != '0'
+        run: exit 1
+
+  sign:
+    needs: collect
+    # Runs after a partial collection too: it signs what was collected and reports the rest.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the kit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Depthmark-Lab/test-evidences
+          ref: ${{ github.workflow_sha }}
+          path: .evidence-kit
+          persist-credentials: false
+
+      - name: Download the predicates
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: evidence-predicates
+          path: ${{ runner.temp }}/predicates
+
+      - name: Sign with Vault Transit
+        env:
+          EVD_IN_TYPES: ${{ inputs.types }}
+          EVD_IN_SUBJECT: ${{ inputs.subject-repo-path }}
+          EVD_IN_SHA256: ${{ inputs.subject-sha256 }}
+          EVD_IN_ENFORCE: ${{ inputs.enforce }}
+        run: |
+          set -euo pipefail
+          args=(sign --types "$EVD_IN_TYPES" --predicates "$RUNNER_TEMP/predicates"
+                --subject-repo-path "$EVD_IN_SUBJECT" --subject-sha256 "$EVD_IN_SHA256" --out "$RUNNER_TEMP/envelopes")
+          if [ "$EVD_IN_ENFORCE" = "true" ]; then args+=(--enforce); fi
+          python3 .evidence-kit/evidence/cli.py "${args[@]}"
+
+      - name: Upload the signed envelopes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence-envelopes
+          path: ${{ runner.temp }}/envelopes
+          if-no-files-found: ignore
+          overwrite: true

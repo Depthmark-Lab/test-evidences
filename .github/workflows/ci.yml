@@ -1,0 +1,26 @@
+# The kit's own checks on every push, on the Talos runners: catalog, schemas,
+# examples, lock and layering, then the tests against stand-in services.
+name: ci
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: [self-hosted, talos, lab]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check
+        run: python3 evidence/cli.py check
+
+      - name: Test
+        run: python3 -m unittest discover -s tests -v

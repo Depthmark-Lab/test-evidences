@@ -1,0 +1,101 @@
+# Demo of the whole chain on the Talos runners, as a squad and a consumer would see it:
+#   build     builds a sample application with leaked secrets and vulnerable
+#             dependencies, and packages it: the artifact the evidence is about
+#   evidence  collects evidence about it, then signs it with Vault Transit
+#   verify    checks every envelope with the trusted public keys only
+name: demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      types:
+        description: Comma-separated evidence type ids
+        required: true
+        type: string
+        default: secret-detection,sca,peer-approval,custom
+      enforce:
+        description: Fail when a check's result is "fail" (the sample fails secret-detection and sca on purpose)
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: [self-hosted, talos, lab]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.package.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the sample application
+        run: |
+          python3 tests/scanners/sample.py "$RUNNER_TEMP/sample-app"
+          cp demo/predicate.json "$RUNNER_TEMP/sample-app/"
+
+      - name: Package it
+        id: package
+        run: |
+          tar -C "$RUNNER_TEMP" --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
+            -czf "$RUNNER_TEMP/sample-app.tar.gz" sample-app
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/sample-app.tar.gz" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sample-app
+          path: ${{ runner.temp }}/sample-app.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sample-app-source
+          path: ${{ runner.temp }}/sample-app
+          if-no-files-found: error
+          retention-days: 1
+
+  evidence:
+    needs: build
+    uses: ./.github/workflows/evidence.yml
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    with:
+      types: ${{ inputs.types }}
+      subject-repo-path: lab-artifacts/sample-app/${{ github.run_number }}/sample-app.tar.gz
+      subject-sha256: ${{ needs.build.outputs.sha256 }}
+      source-artifact: sample-app-source
+      # predicate-file only when custom is requested: a parameter no requested type uses is refused.
+      params: ${{ contains(format(',{0},', inputs.types), ',custom,') && 'predicate-file=predicate.json' || '' }}
+      enforce: ${{ inputs.enforce }}
+
+  verify:
+    needs: [build, evidence]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: [self-hosted, talos, lab]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: evidence-envelopes
+          path: ${{ runner.temp }}/envelopes
+
+      - name: Verify with the trusted public keys
+        env:
+          EVD_IN_TYPES: ${{ inputs.types }}
+          EVD_IN_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          python3 evidence/cli.py verify --envelopes "$RUNNER_TEMP/envelopes" --keys trusted-keys \
+            --subject-sha256 "$EVD_IN_SHA256" --types "$EVD_IN_TYPES"

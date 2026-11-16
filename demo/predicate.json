@@ -1,0 +1,4 @@
+{
+  "loadTest": {"tool": "k6", "p95Ms": 180, "errorRate": 0.002},
+  "note": "Declared by the demo workflow. Signed with the self key: the platform verified none of it."
+}

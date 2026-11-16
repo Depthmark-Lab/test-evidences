@@ -1,0 +1,5 @@
+{
+  "declaredBy": "acme-bank/payments",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "claims": {"loadTest": {"p95Ms": 180, "tool": "k6"}}
+}

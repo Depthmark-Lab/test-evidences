@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "code-quality-gate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["result", "server", "projectKey", "analysisId", "commit", "status", "conditions"],
+  "properties": {
+    "result": {"enum": ["pass", "fail"], "description": "pass when the gate status is OK"},
+    "server": {"type": "string", "pattern": "^https?://"},
+    "projectKey": {"type": "string", "minLength": 1},
+    "analysisId": {"type": "string", "minLength": 1},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "status": {"enum": ["OK", "WARN", "ERROR", "NONE"]},
+    "conditions": {
+      "type": "array",
+      "description": "Gate conditions exactly as SonarQube returned them",
+      "items": {"type": "object"}
+    }
+  }
+}

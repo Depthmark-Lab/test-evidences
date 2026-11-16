@@ -1,0 +1,7 @@
+# Labels of the ARC scale sets on the Talos cluster (homelab repository,
+# talos/apps/action-runner-controller-dev/gha-runner-scale-set-lab*).
+self-hosted-runner:
+  labels:
+    - talos
+    - lab
+    - lab-k8s

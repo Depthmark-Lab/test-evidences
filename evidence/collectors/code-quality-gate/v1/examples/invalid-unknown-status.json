@@ -1,0 +1,9 @@
+{
+  "result": "pass",
+  "server": "https://sonarqube.acme-bank.example",
+  "projectKey": "acme-bank_payments",
+  "analysisId": "AX-1",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status": "GREEN",
+  "conditions": []
+}
