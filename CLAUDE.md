@@ -59,4 +59,4 @@ Python standard library only. Keep it that way in the signing path. Scanners are
 
 Verified on 2026-11-16 against a local `vault server -dev` (2.1.2): `bootstrap.sh` and `apply.sh` with the new roles (both idempotent), login, signing with PKCS#1 v1.5 and PSS, verification by the kit and by openssl, and the refusals (another workflow or branch, a GitHub-hosted runner, the wrong audience, a scan token using the self key, exporting the key). The homelab Vault runs 1.20.4 and was not touched.
 
-Never run: the workflows on the Talos runners, GitHub's real OIDC tokens against the homelab Vault, and whether the `rg-talos-lab` runner group admits this repository.
+On the Talos runners, `ci` passed in runner group `rg-talos-lab` on 2026-11-16. Never run: `demo` and `evidence.yml`, and GitHub's real OIDC tokens against the homelab Vault. `demo.yml` has only `workflow_dispatch`, so GitHub offers it only once the file is on `main`.

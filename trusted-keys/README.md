@@ -2,7 +2,7 @@
 
 The public keys `evidence/cli.py verify` accepts signatures from, one file per key version, named by the key id the signer writes in each envelope: `evd-<family>-lab-v<version>.pub.pem`.
 
-The private keys stay in Vault Transit and cannot be exported. The homelab script that creates the keys also writes these files:
+The private keys stay in Vault Transit and cannot be exported. The homelab script that creates the keys also writes these files, into the folder you name relative to where you run it, so run it from the root of this repository:
 
 ```
 ~/code/alexandreodelisle/homelab/vault/transit-evidence/bootstrap.sh trusted-keys

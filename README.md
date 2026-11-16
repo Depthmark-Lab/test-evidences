@@ -48,7 +48,7 @@ action.yml, Dockerfile           the one-job and container forms of the kit
 Run in this order. The Vault steps need an admin token; the homelab repository holds the Vault side so that changing a workflow here cannot change who Vault trusts.
 
 1. **Vault must be healthy.** On 2026-11-16, `vault-0` and `vault-2` had been sealed for three days and only `vault-1` was serving. Unseal them first.
-2. **Transit mount, keys and public keys:**
+2. **Transit mount, keys and public keys.** Run it from the root of this repository: the folder is relative to where you run it.
    ```
    ~/code/alexandreodelisle/homelab/vault/transit-evidence/bootstrap.sh trusted-keys
    ```
@@ -62,7 +62,7 @@ Run in this order. The Vault steps need an admin token; the homelab repository h
 
 ## Running it
 
-Run the `demo` workflow from the Actions tab, or `gh workflow run demo.yml --ref feature/vault-transit-signing`. With the default types it produces four envelopes:
+Run the `demo` workflow from the Actions tab, or `gh workflow run demo.yml --ref <branch>`. GitHub offers a workflow that has only `workflow_dispatch` once its file is on `main`; until then `gh` answers that no workflow is named `demo.yml`. With `--ref`, the run uses the branch's version of the file. With the default types it produces four envelopes:
 
 | Type | Signed with | Expected result on the sample |
 |---|---|---|
@@ -84,7 +84,7 @@ python3 evidence/cli.py verify --envelopes /tmp/envelopes --keys trusted-keys
 - In the runner image `ghcr.io/actions/actions-runner:2.338.2`, capped at 512Mi: `install-scanners.sh`, and `collect` with the real TruffleHog and Grype on the sample app.
 - Against a local `vault server -dev`: `bootstrap.sh` and `apply.sh` with the new roles, JWT login with GitHub-shaped tokens, signing with PKCS#1 v1.5 and PSS, `verify`, openssl, and every refusal: another workflow or branch, a GitHub-hosted runner, the wrong audience, a scan token using the self key, exporting a key.
 
-Not run yet: the workflows on the Talos runners, real GitHub OIDC tokens against the homelab Vault (1.20.4), and the runner group's access.
+On the Talos runners: `ci` passed on `gha-runner-scale-set-lab` in `rg-talos-lab` on 2026-11-16, so the runner group admits this repository. Not run yet: `demo` and `evidence.yml`, and real GitHub OIDC tokens against the homelab Vault (1.20.4).
 
 ## Differences from the bank kit
 
