@@ -1,0 +1,7 @@
+{
+  "code-quality-gate/v1": "2be9c6bfb31b5f3208b42500b804f8d97166db87656f5f0a648371ca0fc96e17",
+  "custom/v1": "eae086102bd8a07da1c9917f548da339270b052bfa3d075a7024e928ec5af7bb",
+  "peer-approval/v1": "80baf17e943788b9b205d3bb9fed6f51e8f1c6099ecf35a24d47f3d45b0718b7",
+  "sca/v1": "7040534aa8a880d8227543f6fb12c94246f50b462453a575bf5517b4dbc31ccc",
+  "secret-detection/v1": "2d4b16e4b6dba5a6eb53dc715d35257494f9d1c6dfe24a8fddb9fbee13e6fb9e"
+}

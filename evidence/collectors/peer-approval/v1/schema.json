@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "peer-approval v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["result", "repository", "commit", "pullRequest", "approvers", "approvalCount"],
+  "properties": {
+    "result": {"enum": ["pass", "fail"], "description": "pass when at least one person other than the author approved"},
+    "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "pullRequest": {
+      "type": ["object", "null"],
+      "description": "null when the commit did not come from a merged pull request",
+      "additionalProperties": false,
+      "required": ["number", "url", "author", "mergedBy", "mergedAt", "baseRef", "headCommit"],
+      "properties": {
+        "number": {"type": "integer"},
+        "url": {"type": "string", "minLength": 1},
+        "author": {"type": "string", "minLength": 1},
+        "mergedBy": {"type": ["string", "null"]},
+        "mergedAt": {"type": "string", "minLength": 1},
+        "baseRef": {"type": "string", "minLength": 1},
+        "headCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "approvers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["login", "reviewedCommit", "submittedAt"],
+        "properties": {
+          "login": {"type": "string", "minLength": 1},
+          "reviewedCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+          "submittedAt": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "approvalCount": {"type": "integer"}
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "declaredBy": "acme-bank/payments",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "claims": [1, 2, 3]
+}

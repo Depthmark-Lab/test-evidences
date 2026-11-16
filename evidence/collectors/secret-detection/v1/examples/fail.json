@@ -1,0 +1,30 @@
+{
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "findings": [
+    {
+      "detector": "SlackWebhook",
+      "file": "config/settings.py",
+      "line": 1,
+      "verification": "unverified"
+    },
+    {
+      "detector": "PrivateKey",
+      "file": "deploy-key.pem",
+      "line": 1,
+      "verification": "unverified"
+    }
+  ],
+  "path": ".",
+  "result": "fail",
+  "scanner": {
+    "name": "trufflehog",
+    "version": "3.99.9"
+  },
+  "summary": {
+    "total": 2,
+    "unknown": 0,
+    "unverified": 2,
+    "verified": 0
+  },
+  "verification": false
+}

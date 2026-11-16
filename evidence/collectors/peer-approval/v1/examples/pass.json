@@ -1,0 +1,18 @@
+{
+  "result": "pass",
+  "repository": "acme-bank/payments",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "pullRequest": {
+    "number": 7,
+    "url": "https://github.com/acme-bank/payments/pull/7",
+    "author": "alice",
+    "mergedBy": "bob",
+    "mergedAt": "2026-11-01T10:00:00Z",
+    "baseRef": "main",
+    "headCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "approvers": [
+    {"login": "bob", "reviewedCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "submittedAt": "2026-10-31T12:00:00Z"}
+  ],
+  "approvalCount": 1
+}

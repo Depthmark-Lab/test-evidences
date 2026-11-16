@@ -1,0 +1,15 @@
+{
+  "identity": "github",
+  "tier": "lab",
+  "store": "file",
+  "predicateBase": "https://github.com/Depthmark-Lab/test-evidences/tree/main/evidence/collectors",
+  "families": ["scan", "approval", "self"],
+  "vault": {
+    "addr": "https://vault.adelisle.com",
+    "authPath": "github-actions",
+    "audience": "https://vault.adelisle.com",
+    "transitMount": "transit-evidence",
+    "signatureAlgorithm": "pkcs1v15"
+  },
+  "collectorEnv": {}
+}

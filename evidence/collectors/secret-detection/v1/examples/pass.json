@@ -1,0 +1,17 @@
+{
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "findings": [],
+  "path": ".",
+  "result": "pass",
+  "scanner": {
+    "name": "trufflehog",
+    "version": "3.99.9"
+  },
+  "summary": {
+    "total": 0,
+    "unknown": 0,
+    "unverified": 0,
+    "verified": 0
+  },
+  "verification": false
+}

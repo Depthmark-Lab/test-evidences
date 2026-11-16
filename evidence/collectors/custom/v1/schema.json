@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "custom v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["declaredBy", "commit", "claims"],
+  "properties": {
+    "declaredBy": {"type": "string", "pattern": "^[^/]+/[^/]+$", "description": "Repository that declared the claims"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "claims": {"type": "object", "description": "Free-form content supplied by the squad"}
+  }
+}

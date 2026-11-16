@@ -1,0 +1,68 @@
+# Packaging detail of the evidence workflow: it puts evidence/ on the runner and runs it.
+# Squads do not call this action directly. A job that did would not match the
+# job_workflow_ref that Vault and JFrog trust, so it could not sign anything.
+#
+# This is the one-job form: collect and sign in the same job. The lab's
+# evidence.yml uses the two-job form instead (collect, then sign), so the
+# scanners never run next to the id-token permission.
+name: evidence
+description: Collect, validate, sign and attach release evidence (used by the evidence reusable workflow)
+
+inputs:
+  types:
+    description: Comma-separated evidence type ids
+    required: true
+  subject-repo-path:
+    description: Artifactory path of the artifact
+    required: true
+  subject-sha256:
+    description: SHA-256 of the artifact
+    required: false
+    default: ""
+  params:
+    description: Collector parameters, one name=value per line
+    required: false
+    default: ""
+  out:
+    description: Store "file" only. Directory to write one <type>.dsse.json to
+    required: false
+    default: ""
+  predicate-file:
+    description: Path to the caller's predicate.json (type "custom" only)
+    required: false
+    default: ""
+  enforce:
+    description: Fail when a check's result is "fail"
+    required: false
+    default: "false"
+  github-token:
+    description: Token for read-only GitHub API calls made by collectors
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run evidence
+      shell: bash
+      env:
+        # Inputs travel as environment variables, never interpolated into the script.
+        EVD_IN_TYPES: ${{ inputs.types }}
+        EVD_IN_SUBJECT: ${{ inputs.subject-repo-path }}
+        EVD_IN_SHA256: ${{ inputs.subject-sha256 }}
+        EVD_IN_PARAMS: ${{ inputs.params }}
+        EVD_IN_OUT: ${{ inputs.out }}
+        EVD_IN_PREDICATE_FILE: ${{ inputs.predicate-file }}
+        EVD_IN_ENFORCE: ${{ inputs.enforce }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        args=(run --types "$EVD_IN_TYPES" --subject-repo-path "$EVD_IN_SUBJECT")
+        if [ -n "$EVD_IN_SHA256" ]; then args+=(--subject-sha256 "$EVD_IN_SHA256"); fi
+        while IFS= read -r line; do
+          if [ -n "${line//[[:space:]]/}" ]; then args+=(--param "$line"); fi
+        done <<<"$EVD_IN_PARAMS"
+        if [ -n "$EVD_IN_OUT" ]; then args+=(--out "$EVD_IN_OUT"); fi
+        if [ -n "$EVD_IN_PREDICATE_FILE" ]; then args+=(--param "predicate-file=$EVD_IN_PREDICATE_FILE"); fi
+        if [ "$EVD_IN_ENFORCE" = "true" ]; then args+=(--enforce); fi
+        python3 "$GITHUB_ACTION_PATH/evidence/cli.py" "${args[@]}"
