@@ -220,7 +220,9 @@ jobs:
   sign:
     needs: collect
     # Runs after a partial collection too: it signs what was collected and reports the rest.
-    if: ${{ !cancelled() }}
+    # Takes the predicates by the id collect's own upload returned. Without one, because
+    # nothing was collected or the collect runner died, there is nothing to sign.
+    if: ${{ !cancelled() && needs.collect.outputs.predicates-id != '' }}
     runs-on: ${{ fromJSON(inputs.runs-on) }}
     timeout-minutes: 10
     permissions:
@@ -235,9 +237,7 @@ jobs:
           path: .evidence-kit
           persist-credentials: false
 
-      # By the id collect's own upload returned. Nothing uploaded means nothing to sign.
       - name: Download the predicates
-        if: needs.collect.outputs.predicates-id != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.collect.outputs.predicates-id }}

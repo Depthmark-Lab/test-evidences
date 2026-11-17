@@ -79,7 +79,6 @@ jobs:
 
   verify:
     needs: evidence
-    if: ${{ !cancelled() }}
     runs-on: [self-hosted, talos, lab]
     timeout-minutes: 10
     permissions:

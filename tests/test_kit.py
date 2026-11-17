@@ -311,8 +311,9 @@ class ScannerTest(Kit):
         self.assertIn(REMOVED_SECRET, TRUFFLEHOG_OUTPUT)
         self.assertNotIn(REMOVED_SECRET, json.dumps(predicate) + output)
         argv = self.calls(calls)[-1]["argv"]
-        self.assertEqual(argv[:4] + argv[6:], ["filesystem", ".", "--json", "--no-update", "--no-verification"])
-        self.assertEqual(argv[4], "--exclude-paths")   # .git, so its objects are not reported a second time
+        self.assertEqual(argv[:5] + argv[7:],
+                         ["filesystem", ".", "--json", "--no-update", "--local-dev", "--no-verification"])
+        self.assertEqual(argv[5], "--exclude-paths")   # .git, so its objects are not reported a second time
 
     def test_secret_verification_is_off_unless_asked(self):
         calls = self.fake("trufflehog", TRUFFLEHOG_OUTPUT)
@@ -977,8 +978,9 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("id: hand-off", self.step("collect", "Hand the predicates to the sign job"))
         download = self.step("sign", "Download the predicates")
         self.assertIn("artifact-ids: ${{ needs.collect.outputs.predicates-id }}", download)
-        self.assertIn("if: needs.collect.outputs.predicates-id != ''", download)
         self.assertNotIn("name:", download)
+        # Without an id there is nothing to sign: the collect runner died, or collected nothing.
+        self.assertIn("if: ${{ !cancelled() && needs.collect.outputs.predicates-id != '' }}", jobs["sign"])
         self.assertIn("EVD_IN_SHA256: ${{ needs.collect.outputs.subject-sha256 }}", jobs["sign"])
 
     def test_the_platform_hashes_the_artifact_itself(self):

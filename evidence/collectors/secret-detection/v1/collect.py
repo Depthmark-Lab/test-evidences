@@ -32,7 +32,11 @@ with tempfile.TemporaryDirectory() as scratch:
     exclude = os.path.join(scratch, "exclude.txt")
     with open(exclude, "w", encoding="utf-8") as handle:
         handle.write(EXCLUDE + "\n")
-    command = ["trufflehog", "filesystem", path, "--json", "--no-update", "--exclude-paths", exclude]
+    # --local-dev scans in this process. Without it TruffleHog runs under its self-updater even
+    # with --no-update: a parent that only waits, and a child that scans, each holding every
+    # detector, about 250 MiB apiece. Together they exceeded the runner's 512Mi.
+    command = ["trufflehog", "filesystem", path, "--json", "--no-update", "--local-dev",
+               "--exclude-paths", exclude]
     if verify == "false":
         command.append("--no-verification")
     output = run_tool(command)

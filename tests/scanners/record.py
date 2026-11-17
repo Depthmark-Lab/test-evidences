@@ -44,8 +44,8 @@ def record_trufflehog(app):
     """Same command as the secret-detection collector with its default parameters."""
     exclude = app.parent / "exclude.txt"
     exclude.write_text("(^|/)\\.git/\n")
-    lines = run(["trufflehog", "filesystem", ".", "--json", "--no-update", "--exclude-paths", str(exclude),
-                 "--no-verification"], cwd=app).splitlines()
+    lines = run(["trufflehog", "filesystem", ".", "--json", "--no-update", "--local-dev",
+                 "--exclude-paths", str(exclude), "--no-verification"], cwd=app).splitlines()
     scrubbed = []
     for line in lines:
         found = json.loads(line)

@@ -30,9 +30,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # Node 25 and later need libatomic.so.1, which the runner image lacks and a job
+      # without root cannot install: setup-node fails with exit code 127.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "26"
+          node-version: "24"
 
       - name: Test, with the squad's own flags
         run: |
@@ -81,7 +83,6 @@ jobs:
 
   verify:
     needs: evidence
-    if: ${{ !cancelled() }}
     runs-on: [self-hosted, talos, lab]
     timeout-minutes: 10
     permissions:
