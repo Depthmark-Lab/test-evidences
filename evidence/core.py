@@ -1,4 +1,5 @@
-"""Shared by every part of the kit: the error type, log masking, JSON files, JSON over HTTP and DSSE encoding.
+"""Shared by every part of the kit: the error type, log masking, JSON files, JSON over HTTP, DSSE encoding
+and predicate types.
 
 Knows nothing of Vault or JFrog, so collectors, evidence processing and
 verification can use it. Anything that talks to Vault or JFrog belongs in
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -17,6 +19,30 @@ PAYLOAD_TYPE = "application/vnd.in-toto+json"
 
 class EvidenceError(Exception):
     """A step failed in a way the pipeline owner should read."""
+
+
+def predicate_type(settings, type_id, entry, version):
+    """The predicateType a statement of this evidence type and version carries.
+
+    A version listed in the entry's "predicateTypes" uses that standard type,
+    such as SLSA provenance, so other tools can read it. Every other version
+    is <predicateBase>/<type>/<version>.
+    """
+    return entry.get("predicateTypes", {}).get(version) or f"{settings['predicateBase']}/{type_id}/{version}"
+
+
+def evidence_type(kind, catalog, settings):
+    """The (type id, version) a predicateType names, or raise: the reverse of predicate_type()."""
+    for type_id, entry in catalog.items():
+        for version, declared in entry.get("predicateTypes", {}).items():
+            if declared == kind:
+                return type_id, version
+    base = settings["predicateBase"].rstrip("/") + "/"
+    type_id, _, version = kind[len(base):].partition("/") if kind.startswith(base) else ("", "", "")
+    if (type_id in catalog and re.fullmatch(r"v[0-9]+", version)
+            and version not in catalog[type_id].get("predicateTypes", {})):
+        return type_id, version
+    raise EvidenceError(f"unknown predicate type '{kind}'")
 
 
 def mask(value):

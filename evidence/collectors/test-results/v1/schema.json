@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "test-results v1",
+  "description": "What the tests of the build that produced an artifact reported, read from its JUnit XML reports. Names failed tests, never their messages",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["result", "commit", "format", "summary", "reports", "failedTests"],
+  "properties": {
+    "result": {"enum": ["pass", "fail"], "description": "fail when a test failed or errored, or when the reports hold no test at all"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "format": {"const": "junit-xml"},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tests", "passed", "failed", "errored", "skipped", "flaky"],
+      "properties": {
+        "tests": {"type": "integer"},
+        "passed": {"type": "integer"},
+        "failed": {"type": "integer"},
+        "errored": {"type": "integer"},
+        "skipped": {"type": "integer"},
+        "flaky": {"type": "integer", "description": "Passed only when rerun, as Surefire reports with rerunFailingTestsCount"}
+      }
+    },
+    "reports": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The JUnit XML files read, so the evidence points at exact bytes",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "sha256", "tests"],
+        "properties": {
+          "file": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "tests": {"type": "integer"}
+        }
+      }
+    },
+    "failedTests": {
+      "type": "array",
+      "description": "The first 100 tests that failed or errored. There is deliberately no field for the failure message",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["suite", "test", "outcome", "report"],
+        "properties": {
+          "suite": {"type": "string"},
+          "test": {"type": "string", "minLength": 1},
+          "outcome": {"enum": ["failed", "errored"]},
+          "report": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

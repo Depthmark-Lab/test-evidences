@@ -104,7 +104,7 @@ class Services:
             "tier": "prod",
             "store": "jfrog",
             "predicateBase": "https://evidence.acme-bank.example",
-            "families": ["scan", "approval", "self"],
+            "families": ["scan", "approval", "self", "build"],
             "vault": {"addr": self.url, "namespace": "platform", "authPath": "github-actions",
                       "audience": "https://vault.acme-bank.example", "transitMount": "transit-evidence",
                       "signatureAlgorithm": "pkcs1v15"},

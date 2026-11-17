@@ -1,0 +1,109 @@
+# A squad's own CI for samples/hello-python, as it would sit in the squad's repository:
+#   build     the squad's job: its Python, its pytest flags, its packaging. Only the
+#             bundle it built and pytest's JUnit report reach the platform.
+#   evidence  the platform's evidence.yml: hashes and scans the bundle, reads the
+#             report, records provenance, and signs it all with Vault Transit
+#   verify    a consumer's check: hashes the bundle itself and verifies the
+#             envelopes about it with the trusted public keys only
+name: hello-python
+
+on:
+  push:
+    paths:
+      - samples/hello-python/**
+      - .github/workflows/hello-python.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: [self-hosted, talos, lab]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: samples/hello-python
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Test, with the squad's own flags
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements-dev.txt
+          python -m pytest -q -p no:cacheprovider --junitxml=reports/junit.xml
+
+      - name: Package the service with its dependencies
+        run: |
+          bundle="$RUNNER_TEMP/hello-python"
+          python -m pip install --disable-pip-version-check --no-deps --no-compile \
+            --target "$bundle/site-packages" -r requirements.txt
+          cp -r hello "$bundle/"
+          tar -C "$RUNNER_TEMP" --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -cf - hello-python \
+            | gzip -n >"$RUNNER_TEMP/hello-python.tar.gz"
+
+      - name: Hand the bundle over
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hello-python-bundle
+          path: ${{ runner.temp }}/hello-python.tar.gz
+          if-no-files-found: error
+
+      - name: Hand the test report over
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hello-python-test-reports
+          path: samples/hello-python/reports/junit.xml
+          if-no-files-found: error
+
+  evidence:
+    needs: build
+    uses: ./.github/workflows/evidence.yml
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    with:
+      types: secret-detection,sca,test-results,provenance
+      subject-repo-path: lab-artifacts/hello-python/${{ github.run_number }}/hello-python.tar.gz
+      subject-artifact: hello-python-bundle
+      reports-artifact: hello-python-test-reports
+      params: secrets-path=samples/hello-python
+
+  verify:
+    needs: evidence
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, talos, lab]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hello-python-bundle
+          path: ${{ runner.temp }}/artifact
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: evidence-envelopes
+          path: ${{ runner.temp }}/envelopes
+
+      - name: Verify the bundle's evidence with the trusted public keys
+        run: |
+          sha256=$(sha256sum "$RUNNER_TEMP/artifact/hello-python.tar.gz" | cut -d' ' -f1)
+          python3 evidence/cli.py verify --envelopes "$RUNNER_TEMP/envelopes" --keys trusted-keys \
+            --subject-sha256 "$sha256" --types secret-detection,sca,test-results,provenance
+
+      - name: Show the signed statements
+        run: python3 scripts/show-envelopes.py "$RUNNER_TEMP"/envelopes/*.dsse.json

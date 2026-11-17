@@ -1,0 +1,36 @@
+{
+  "buildDefinition": {
+    "buildType": "https://example.com/my-own-build/v1",
+    "externalParameters": {
+      "workflow": {
+        "ref": "refs/heads/main",
+        "repository": "https://github.com/Depthmark-Lab/test-evidences",
+        "path": ".github/workflows/hello-maven.yml"
+      }
+    },
+    "internalParameters": {
+      "github": {
+        "event_name": "push",
+        "repository_id": "1460010558",
+        "repository_owner_id": "71595780",
+        "runner_environment": "self-hosted"
+      }
+    },
+    "resolvedDependencies": [
+      {
+        "uri": "git+https://github.com/Depthmark-Lab/test-evidences@refs/heads/main",
+        "digest": {
+          "gitCommit": "3affa072b1111a4e1e5a6f1ef063971449fdaf5b"
+        }
+      }
+    ]
+  },
+  "runDetails": {
+    "builder": {
+      "id": "https://github.com/Depthmark-Lab/test-evidences/.github/workflows/hello-maven.yml@refs/heads/main"
+    },
+    "metadata": {
+      "invocationId": "https://github.com/Depthmark-Lab/test-evidences/actions/runs/44001716002/attempts/1"
+    }
+  }
+}

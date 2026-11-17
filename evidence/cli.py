@@ -34,7 +34,7 @@ import collection  # noqa: E402
 import schema as schemas  # noqa: E402
 import signing  # noqa: E402
 import verification  # noqa: E402
-from core import EvidenceError, load_json  # noqa: E402
+from core import EvidenceError, load_json, predicate_type  # noqa: E402
 from version import __version__  # noqa: E402
 
 COLLECTORS = collection.COLLECTORS
@@ -48,10 +48,6 @@ def load_settings():
 
 def load_catalog():
     return load_json(ROOT / "catalog.json")
-
-
-def predicate_type(settings, type_id, version):
-    return f"{settings['predicateBase']}/{type_id}/{version}"
 
 
 # ---- run, collect and sign ----------------------------------------------------
@@ -109,7 +105,7 @@ def make_store(settings, args, vault):
     store(type_id, entry, predicate) signs one predicate and returns the key id.
     """
     def kind(type_id, entry):
-        return predicate_type(settings, type_id, entry["current"])
+        return predicate_type(settings, type_id, entry, entry["current"])
 
     if settings.get("store", "jfrog") == "file":
         out = Path(args.out)
@@ -310,7 +306,7 @@ def cmd_list(_args):
     for type_id in sorted(catalog):
         entry = catalog[type_id]
         print(f"{type_id}  ({entry['family']} key, {entry['current']})  {entry.get('description', '')}")
-        print(f"    predicate type: {predicate_type(settings, type_id, entry['current'])}")
+        print(f"    predicate type: {predicate_type(settings, type_id, entry, entry['current'])}")
         for name, spec in entry.get("params", {}).items():
             need = "required" if spec.get("required") else "optional"
             print(f"    param {name} ({need}): {spec.get('description', '')}")
@@ -352,6 +348,7 @@ def find_problems():
     problems = []
     settings, catalog = load_settings(), load_catalog()
     lock = load_json(LOCK) if LOCK.exists() else {}
+    standard_types = {}
 
     for type_id, entry in sorted(catalog.items()):
         where = f"catalog '{type_id}'"
@@ -367,6 +364,15 @@ def find_problems():
         timeout = entry.get("timeout", collection.DEFAULT_TIMEOUT)
         if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
             problems.append(f"{where}: timeout must be a whole number of seconds")
+        for version, kind in entry.get("predicateTypes", {}).items():
+            if not (COLLECTORS / type_id / version).is_dir():
+                problems.append(f"{where}: predicateTypes names version '{version}', which has no collector folder")
+            if not re.fullmatch(r"https://\S+", str(kind)) or str(kind).startswith(settings["predicateBase"]):
+                problems.append(f"{where}: predicateTypes '{version}' must be another standard's https URL, "
+                                f"not '{kind}'")
+            if kind in standard_types:
+                problems.append(f"{where}: predicateTypes '{kind}' is already used by {standard_types[kind]}")
+            standard_types[kind] = f"{type_id}/{version}"
 
     for folder in sorted(COLLECTORS.glob("*/*")):
         if not folder.is_dir():

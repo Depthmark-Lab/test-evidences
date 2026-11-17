@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+	<testsuite name="greeting" time="0.000786" disabled="0" errors="0" tests="1" failures="0" skipped="0" timestamp="2026-11-17T20:35:10.605Z" hostname="ca40d6f2ef3d">
+		<testcase name="greets the world by default" time="0.000454" classname="greeting" file="/p/test/app.test.js"/>
+	</testsuite>
+	<testsuite name="web service" time="0.022936" disabled="0" errors="0" tests="2" failures="0" skipped="0" timestamp="2026-11-17T20:35:10.591Z" hostname="ca40d6f2ef3d">
+		<testcase name="hello answers with json" time="0.018638" classname="web service" file="/p/test/app.test.js"/>
+		<testcase name="health says ok" time="0.001831" classname="web service" file="/p/test/app.test.js"/>
+	</testsuite>
+	<!-- tests 3 -->
+	<!-- suites 2 -->
+	<!-- pass 3 -->
+	<!-- fail 0 -->
+	<!-- cancelled 0 -->
+	<!-- skipped 0 -->
+	<!-- todo 0 -->
+	<!-- duration_ms 93.493515 -->
+</testsuites>

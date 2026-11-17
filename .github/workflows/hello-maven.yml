@@ -1,0 +1,105 @@
+# A squad's own CI for samples/hello-maven, as it would sit in the squad's repository:
+#   build     the squad's job: its toolchain, its Maven flags, its tests. Only the
+#             jar it built and the Surefire reports reach the platform.
+#   evidence  the platform's evidence.yml: hashes and scans the jar, reads the
+#             reports, records provenance, and signs it all with Vault Transit
+#   verify    a consumer's check: hashes the jar itself and verifies the envelopes
+#             about it with the trusted public keys only
+name: hello-maven
+
+on:
+  push:
+    paths:
+      - samples/hello-maven/**
+      - .github/workflows/hello-maven.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: [self-hosted, talos, lab]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: samples/hello-maven
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Build and test, with the squad's own flags
+        env:
+          # The platform never sees these flags. It reads the reports they produce.
+          MAVEN_ARGS: -B -ntp -Dstyle.color=never -Dsurefire.rerunFailingTestsCount=1
+          # The runner container has 512Mi for everything. With default settings, Maven's JVM and
+          # Surefire's forked test JVM ran out of it; this applies to both, and fits in 384Mi.
+          JAVA_TOOL_OPTIONS: -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:MaxRAMPercentage=25 -Xss512k
+        run: ./mvnw verify
+
+      - name: Hand the jar over
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hello-maven-jar
+          path: samples/hello-maven/target/hello-maven.jar
+          if-no-files-found: error
+
+      - name: Hand the test reports over
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hello-maven-test-reports
+          path: samples/hello-maven/target/surefire-reports/*.xml
+          if-no-files-found: error
+
+  evidence:
+    needs: build
+    uses: ./.github/workflows/evidence.yml
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    with:
+      types: secret-detection,sca,test-results,provenance
+      subject-repo-path: lab-artifacts/hello-maven/${{ github.run_number }}/hello-maven.jar
+      subject-artifact: hello-maven-jar
+      reports-artifact: hello-maven-test-reports
+      params: secrets-path=samples/hello-maven
+
+  verify:
+    needs: evidence
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, talos, lab]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hello-maven-jar
+          path: ${{ runner.temp }}/artifact
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: evidence-envelopes
+          path: ${{ runner.temp }}/envelopes
+
+      - name: Verify the jar's evidence with the trusted public keys
+        run: |
+          sha256=$(sha256sum "$RUNNER_TEMP/artifact/hello-maven.jar" | cut -d' ' -f1)
+          python3 evidence/cli.py verify --envelopes "$RUNNER_TEMP/envelopes" --keys trusted-keys \
+            --subject-sha256 "$sha256" --types secret-detection,sca,test-results,provenance
+
+      - name: Show the signed statements
+        run: python3 scripts/show-envelopes.py "$RUNNER_TEMP"/envelopes/*.dsse.json

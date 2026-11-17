@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="6" time="0.047" timestamp="2026-11-17T20:40:01.461988+00:00" hostname="57d81edae156"><testcase classname="tests.test_app" name="test_greets_the_world_by_default" time="0.000" /><testcase classname="tests.test_app" name="test_hello_answers_with_json" time="0.002" /><testcase classname="tests.test_app" name="test_health_says_ok" time="0.000" /><testcase classname="tests.test_broken" name="test_greets_in_french" time="0.000"><failure message="AssertionError: token=should-never-reach-the-evidence&#10;assert 'Bonjour' == 'Hello'&#10;  &#10;  - Hello&#10;  + Bonjour">def test_greets_in_french():
+&gt;       assert "Bonjour" == "Hello", "token=should-never-reach-the-evidence"
+E       AssertionError: token=should-never-reach-the-evidence
+E       assert 'Bonjour' == 'Hello'
+E         
+E         - Hello
+E         + Bonjour
+
+tests/test_broken.py:10: AssertionError</failure></testcase><testcase classname="tests.test_broken" name="test_uses_a_broken_fixture" time="0.000"><error message="failed on setup with &quot;RuntimeError: the fixture could not start&quot;">@pytest.fixture
+    def broken():
+&gt;       raise RuntimeError("the fixture could not start")
+E       RuntimeError: the fixture could not start
+
+tests/test_broken.py:6: RuntimeError</error></testcase><testcase classname="tests.test_broken" name="test_later" time="0.000"><skipped type="pytest.skip" message="not ready">/p/tests/test_broken.py:17: not ready</skipped></testcase></testsuite></testsuites>
