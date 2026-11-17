@@ -92,6 +92,10 @@ jobs:
           EVD_IN_TYPES: ${{ inputs.types }}
           EVD_IN_PARAMS: ${{ inputs.params }}
           GH_TOKEN: ${{ github.token }}
+          # Outside the work volume, the lab runner pod may write only 4Gi, and Grype's
+          # database alone takes 3.3 GB. Past that, Kubernetes evicts the pod mid-scan.
+          GRYPE_DB_CACHE_DIR: ${{ runner.temp }}/grype-db
+          TMPDIR: ${{ runner.temp }}
         run: |
           set -euo pipefail
           args=(collect --types "$EVD_IN_TYPES" --out "$RUNNER_TEMP/predicates")

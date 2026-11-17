@@ -39,7 +39,7 @@ evidence/
 scripts/install-scanners.sh      TruffleHog and Grype, pinned by version and SHA-256
 trusted-keys/                    public keys from Transit, one per key version
 demo/predicate.json              what the demo declares through the custom type
-tests/                           55 tests against stand-in services and recorded scanner output
+tests/                           57 tests against stand-in services and recorded scanner output
 action.yml, Dockerfile           the one-job and container forms of the kit
 ```
 
@@ -58,7 +58,9 @@ Run in this order. The Vault steps need an admin token; the homelab repository h
    ~/code/alexandreodelisle/homelab/vault/apply.sh evidence-scan-lab evidence-approval-lab evidence-self-lab
    ```
 4. **Runner group.** `rg-talos-lab` must allow this repository.
-5. **Runner memory.** Raise the runner container limit of `gha-runner-scale-set-lab` from 512Mi to about 1Gi, or the `sca` type will likely be OOM-killed. Measured in the runner image: Grype about 300 MiB, TruffleHog about 263 MiB, next to the runner's own processes.
+5. **Runner memory.** Raise the runner container limit of `gha-runner-scale-set-lab` from 512Mi to about 1Gi, or the `sca` type will likely be OOM-killed. Measured in the runner image: Grype about 374 MiB while it downloads its database, which it does on every run since the runners are ephemeral, and TruffleHog about 263 MiB, next to the runner's own processes.
+
+Disk needs nothing: only `/home/runner/_work` is a volume, and the pod may write just 4Gi anywhere else, so `evidence.yml` keeps Grype's 3.3 GB database and temporary files under `runner.temp`.
 
 ## Running it
 
@@ -80,8 +82,8 @@ python3 evidence/cli.py verify --envelopes /tmp/envelopes --keys trusted-keys
 
 ## What was tested
 
-- The 55 tests: the kit against stand-in GitHub, Vault, JFrog and SonarQube, scanners replaying recorded output, both stores, the collect and sign split, verification against openssl, and the shape of `evidence.yml`.
-- In the runner image `ghcr.io/actions/actions-runner:2.338.2`, capped at 512Mi: `install-scanners.sh`, and `collect` with the real TruffleHog and Grype on the sample app.
+- The 57 tests: the kit against stand-in GitHub, Vault, JFrog and SonarQube, scanners replaying recorded output, both stores, the collect and sign split, verification against openssl, and the shape of `evidence.yml`.
+- In the runner image `ghcr.io/actions/actions-runner:2.338.2`, capped at 512Mi and 1 CPU: `install-scanners.sh`, and `collect` with the real TruffleHog and Grype on the sample app. With the work directory on a volume, as on the runners, the cold `sca` run wrote 3.3 GB there and 196 KB to the container itself. At 384Mi it was OOM-killed.
 - Against a local `vault server -dev`: `bootstrap.sh` and `apply.sh` with the new roles, JWT login with GitHub-shaped tokens, signing with PKCS#1 v1.5 and PSS, `verify`, openssl, and every refusal: another workflow or branch, a GitHub-hosted runner, the wrong audience, a scan token using the self key, exporting a key.
 
 On the Talos runners: `ci` passed on `gha-runner-scale-set-lab` in `rg-talos-lab` on 2026-11-16, so the runner group admits this repository. Not run yet: `demo` and `evidence.yml`, and real GitHub OIDC tokens against the homelab Vault (1.20.4).

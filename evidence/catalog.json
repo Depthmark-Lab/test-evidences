@@ -31,6 +31,7 @@
     "family": "scan",
     "current": "v1",
     "timeout": 900,
+    "env": ["GRYPE_DB_CACHE_DIR"],
     "params": {
       "sca-target": {"required": false, "description": "dir:<path> or sbom:<file> to scan (default dir:.)"},
       "sca-fail-on": {"required": false, "description": "Lowest severity that makes the result fail: critical, high, medium, low or negligible (default high)"}

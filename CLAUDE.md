@@ -40,13 +40,15 @@ Writing to Vault is always the user's step. Never print secret values: no `vault
 
 ## Facts measured on the runner image
 
-`ghcr.io/actions/actions-runner:2.338.2` (Ubuntu 24.04) has Python 3.12, openssl, curl, tar, sha256sum and git, and runs as uid 1001 without privilege escalation. In that image, TruffleHog 3.99.9 peaks at about 263 MiB RSS and Grype 0.121.0 at about 300 MiB, and Grype's database takes 3.3 GB in `~/.cache/grype`. The lab runner container is limited to 512Mi, shared with the runner's own processes: expect the `sca` type to be OOM-killed until that limit is raised to about 1Gi.
+`ghcr.io/actions/actions-runner:2.338.2` (Ubuntu 24.04) has Python 3.12, openssl, curl, tar, sha256sum and git, and runs as uid 1001 without privilege escalation. In that image, TruffleHog 3.99.9 peaks at about 263 MiB RSS whatever its `--concurrency`, and Grype 0.121.0 at about 375 MiB, because the database is always downloaded fresh on ephemeral runners. The lab runner container is limited to 512Mi, shared with the runner's own processes (35Mi when idle). The cold `sca` collector passes at 512Mi in 96 s and is OOM-killed at 384Mi, so expect it to be OOM-killed on the runner until the limit is raised to about 1Gi.
+
+Disk: only `/home/runner/_work` is a volume (openebs hostpath, no quota). Everything else the pod writes counts against an ephemeral-storage limit of 4Gi, the buildkit sidecar's limit, which Kubernetes applies to the whole pod. Grype's database takes 3.3 GB, so the collect job sets `GRYPE_DB_CACHE_DIR` and `TMPDIR` under `runner.temp`; the `sca` catalog entry passes `GRYPE_DB_CACHE_DIR` through. Without that, the pod was evicted mid-scan on 2026-11-16 (run 43978188427), and the runner only reports "received a shutdown signal".
 
 ## Working on the kit
 
 ```
 python3 evidence/cli.py check                 # catalog, schemas, examples, lock, store and layering agree
-python3 -m unittest discover -s tests -v      # 55 tests against stand-in services, needs openssl
+python3 -m unittest discover -s tests -v      # 57 tests against stand-in services, needs openssl
 python3 evidence/cli.py list                  # evidence types and their parameters
 python3 evidence/cli.py collect --types sca --out /tmp/predicates     # no Vault, no JFrog
 python3 evidence/cli.py verify --envelopes /tmp/envelopes --keys trusted-keys
@@ -59,4 +61,4 @@ Python standard library only. Keep it that way in the signing path. Scanners are
 
 Verified on 2026-11-16 against a local `vault server -dev` (2.1.2): `bootstrap.sh` and `apply.sh` with the new roles (both idempotent), login, signing with PKCS#1 v1.5 and PSS, verification by the kit and by openssl, and the refusals (another workflow or branch, a GitHub-hosted runner, the wrong audience, a scan token using the self key, exporting the key). The homelab Vault runs 1.20.4 and was not touched.
 
-On the Talos runners, `ci` passed in runner group `rg-talos-lab` on 2026-11-16. Never run: `demo` and `evidence.yml`, and GitHub's real OIDC tokens against the homelab Vault. `demo.yml` has only `workflow_dispatch`, so GitHub offers it only once the file is on `main`.
+On the Talos runners, `ci` passed in runner group `rg-talos-lab` on 2026-11-16. `demo` ran once the same day and the collect job was evicted for disk (see above), so `sign` never reached Vault. Never run: signing with GitHub's real OIDC tokens against the homelab Vault. `demo.yml` has only `workflow_dispatch`, so GitHub offers it only once the file is on `main`. Vault trusts `evidence.yml` from `main` and `feature/vault-transit-signing` only: on any other branch, `sign` is refused at login.
