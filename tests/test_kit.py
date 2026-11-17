@@ -351,6 +351,14 @@ class ScannerTest(Kit):
         self.assertEqual(call["cwdEntries"], [])
         self.assertEqual(call["env"]["GRYPE_CHECK_FOR_APP_UPDATE"], "false")
 
+    def test_sca_keeps_the_grype_database_where_the_job_says(self):
+        # The job moves it to the work volume: the runner pod may write only 4Gi elsewhere.
+        calls = self.fake("grype", GRYPE_OUTPUT)
+        cache = str(self.tmp / "grype-db")
+        code, output, _ = self.collect("sca", extra_env={"GRYPE_DB_CACHE_DIR": cache})
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.calls(calls)[-1]["env"]["GRYPE_DB_CACHE_DIR"], cache)
+
     def test_sca_fail_on_sets_the_threshold(self):
         report = json.loads(GRYPE_OUTPUT)
         report["matches"] = [m for m in report["matches"] if m["vulnerability"]["severity"] == "Medium"]
@@ -754,6 +762,11 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("args=(sign ", jobs["sign"])
         self.assertNotIn("args=(sign ", jobs["collect"])
         self.assertNotIn("install-scanners", jobs["sign"])
+
+    def test_the_collect_job_writes_scanner_data_to_the_work_volume(self):
+        jobs = self.jobs()
+        self.assertIn("GRYPE_DB_CACHE_DIR: ${{ runner.temp }}/grype-db", jobs["collect"])
+        self.assertIn("TMPDIR: ${{ runner.temp }}", jobs["collect"])
 
     def test_the_installed_scanners_are_the_recorded_ones(self):
         script = (REPO_ROOT / "scripts" / "install-scanners.sh").read_text()
