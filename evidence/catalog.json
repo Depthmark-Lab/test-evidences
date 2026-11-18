@@ -53,6 +53,17 @@
     "env": ["GITHUB_WORKFLOW_REF", "GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_REPOSITORY_ID",
             "GITHUB_REPOSITORY_OWNER_ID", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "RUNNER_ENVIRONMENT"]
   },
+  "provenance-attestation": {
+    "description": "GitHub's artifact attestation of the artifact's build provenance, signed with Sigstore, as gh verified it. evidence.yml has GitHub make it first",
+    "family": "build",
+    "current": "v1",
+    "timeout": 300,
+    "env": ["GH_TOKEN"],
+    "params": {
+      "attested-file": {"required": true, "description": "The artifact. evidence.yml sets it to the subject it downloaded and hashed"},
+      "attestation-signer": {"required": true, "description": "<owner>/<repo>/.github/workflows/<file> that must have signed the attestation. evidence.yml sets it to itself"}
+    }
+  },
   "custom": {
     "description": "Anything a squad wants to declare itself. Signed with the self key, never platform-verified",
     "family": "self",

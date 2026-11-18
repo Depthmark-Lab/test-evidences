@@ -5,7 +5,11 @@
 # that fails stops no other.
 #
 # Vault's evidence-<family>-lab roles trust this file by job_workflow_ref, so
-# only a job of this workflow can sign. It runs in two jobs:
+# only a job of this workflow can sign. It runs in two jobs, three for
+# provenance-attestation:
+#   attest   provenance-attestation only: has GitHub attest the artifact's build
+#            provenance with Sigstore, under this workflow's identity. It runs
+#            GitHub's attest action and nothing else.
 #   collect  runs the collector and its scanner, without id-token permission,
 #            so nothing it runs can request a signing token.
 #   sign     checks the predicate again and signs it with Vault Transit, which
@@ -21,9 +25,11 @@
 #
 # With subject-artifact, the platform downloads the artifact itself, computes
 # its SHA-256 and binds every statement to it, sca scans that file, and
-# provenance may be asked for. With reports-artifact, test-results reads the
-# build's JUnit XML from it. The caller's build produces both; this workflow
-# never runs the caller's code.
+# provenance and provenance-attestation may be asked for. GitHub keeps
+# attestations of a private repository only with GitHub Enterprise Cloud: on
+# another plan, the attest job fails there. With reports-artifact, test-results
+# reads the build's JUnit XML from it. The caller's build produces both; this
+# workflow never runs the caller's code.
 #
 # Lab only: the kit is checked out from this repository at the caller's commit,
 # so callers must live in this repository. A caller elsewhere fails at that
@@ -84,13 +90,65 @@ on:
 permissions: {}
 
 jobs:
+  attest:
+    name: 🪪 Attest with GitHub
+    # GitHub signs SLSA build provenance for the artifact with Sigstore, under this workflow's
+    # identity, and keeps it with the repository; collect then verifies it. Nothing here runs
+    # a collector, a scanner or the caller's code. Every caller must grant attestations: write,
+    # whatever its type: GitHub checks a called workflow's permissions before any job runs.
+    if: inputs.type == 'provenance-attestation'
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: 📦 Download the artifact the evidence is about
+        if: inputs.subject-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.subject-artifact }}
+          path: ${{ runner.temp }}/subject
+
+      - name: 🎯 Hash it
+        id: subject
+        env:
+          EVD_IN_SUBJECT_ARTIFACT: ${{ inputs.subject-artifact }}
+        run: |
+          set -euo pipefail
+          if [ -z "$EVD_IN_SUBJECT_ARTIFACT" ]; then
+            echo "::error::provenance-attestation needs subject-artifact: GitHub attests only an artifact the platform downloaded itself"
+            exit 1
+          fi
+          mapfile -t files < <(find "$RUNNER_TEMP/subject" -type f)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "::error::subject-artifact $EVD_IN_SUBJECT_ARTIFACT must hold exactly one file, the artifact, not ${#files[@]}"
+            exit 1
+          fi
+          sha256=$(sha256sum "${files[0]}" | cut -d' ' -f1)
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+          echo "🔒 SHA-256 computed here, from the downloaded file: $sha256"
+
+      # Adds the attestation's link to the summary. Fails where GitHub keeps no attestations.
+      - name: 🪪 Have GitHub attest its build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ inputs.subject-repo-path }}
+          subject-digest: sha256:${{ steps.subject.outputs.sha256 }}
+
   collect:
     name: 🔎 Collect
+    needs: attest
+    # attest runs for provenance-attestation only and is skipped otherwise. When it fails,
+    # there is no attestation to verify.
+    if: ${{ !cancelled() && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}
     runs-on: ${{ fromJSON(inputs.runs-on) }}
     timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: read
+      attestations: read
     outputs:
       subject-sha256: ${{ steps.subject.outputs.sha256 }}
       predicates-id: ${{ steps.hand-off.outputs.artifact-id }}
@@ -164,8 +222,8 @@ jobs:
             origin="computed here, from the downloaded file"
             artifact="\`$(plain "${files[0]##*/}")\`, $size bytes, from the artifact \`$(plain "$EVD_IN_SUBJECT_ARTIFACT")\` of this run"
           else
-            if [ "$EVD_IN_TYPE" = provenance ]; then
-              echo "::error::provenance needs subject-artifact: the platform vouches only for an artifact it downloaded itself"
+            if [ "$EVD_IN_TYPE" = provenance ] || [ "$EVD_IN_TYPE" = provenance-attestation ]; then
+              echo "::error::$EVD_IN_TYPE needs subject-artifact: the platform vouches only for an artifact it downloaded itself"
               exit 1
             fi
             if ! [[ $EVD_IN_SHA256 =~ ^[0-9a-f]{64}$ ]]; then
@@ -190,26 +248,29 @@ jobs:
             echo "| 📋 Type | \`$EVD_IN_TYPE\` |"
           } >>"$GITHUB_STEP_SUMMARY"
 
-      - name: 🧰 Install the scanner
+      - name: 🧰 Install the tool the collector calls
         env:
           EVD_IN_TYPE: ${{ inputs.type }}
         run: |
           set -euo pipefail
-          # Only the scanner this type calls.
+          # Only the tool this type calls: its scanner, or gh to verify GitHub's attestation.
           bin=$RUNNER_TEMP/scanners/bin
           case "$EVD_IN_TYPE" in
             secret-detection)
               .evidence-kit/scripts/install-scanners.sh "$bin" trufflehog
-              scanner="TruffleHog $("$bin/trufflehog" --version 2>&1 | awk '{print $NF}')" ;;
+              role=Scanner tool="TruffleHog $("$bin/trufflehog" --version 2>&1 | awk '{print $NF}')" ;;
             sca)
               .evidence-kit/scripts/install-scanners.sh "$bin" grype
-              scanner="Grype $("$bin/grype" version | awk '$1 == "Version:" {print $2}')" ;;
+              role=Scanner tool="Grype $("$bin/grype" version | awk '$1 == "Version:" {print $2}')" ;;
+            provenance-attestation)
+              .evidence-kit/scripts/install-scanners.sh "$bin" gh
+              role=Verifier tool="gh $("$bin/gh" --version | awk 'NR == 1 {print $3}')" ;;
             *)
-              echo "🧰 $EVD_IN_TYPE calls no scanner"
+              echo "🧰 $EVD_IN_TYPE calls no tool"
               exit 0 ;;
           esac
-          echo "🧰 $scanner, its archive checked against its pinned SHA-256"
-          printf '\n🧰 **Scanner** %s, its archive checked against its pinned SHA-256\n' "$scanner" >>"$GITHUB_STEP_SUMMARY"
+          echo "🧰 $tool, its archive checked against its pinned SHA-256"
+          printf '\n🧰 **%s** %s, its archive checked against its pinned SHA-256\n' "$role" "$tool" >>"$GITHUB_STEP_SUMMARY"
 
       - name: 🔎 Collect
         working-directory: source
@@ -230,12 +291,15 @@ jobs:
           while IFS= read -r line; do
             if [ -n "${line//[[:space:]]/}" ]; then args+=(--param "$line"); fi
           done <<<"$EVD_IN_PARAMS"
-          # This workflow says where the artifact and the reports are. test-reports is never the
-          # caller's: test-results must read what the build uploaded, not files from the repository.
-          if grep -q '^[[:space:]]*test-reports[[:space:]]*=' <<<"$EVD_IN_PARAMS"; then
-            echo "::error::test-reports is set by evidence.yml from reports-artifact, not by the caller"
-            exit 1
-          fi
+          # This workflow says where the artifact and the reports are, and who must have attested,
+          # never the caller: test-results must read what the build uploaded, not files from the
+          # repository, and provenance-attestation must hold GitHub's attestation to this workflow.
+          for name in test-reports attested-file attestation-signer; do
+            if grep -q "^[[:space:]]*${name}[[:space:]]*=" <<<"$EVD_IN_PARAMS"; then
+              echo "::error::$name is set by evidence.yml, not by the caller"
+              exit 1
+            fi
+          done
           if [ "$EVD_IN_TYPE" = test-results ]; then
             if [ -z "$EVD_IN_REPORTS" ]; then
               echo "::error::test-results needs reports-artifact, the build's JUnit XML reports"
@@ -246,6 +310,10 @@ jobs:
           if [ "$EVD_IN_TYPE" = sca ] && [ -n "$EVD_IN_SUBJECT_FILE" ] \
               && ! grep -q '^[[:space:]]*sca-target[[:space:]]*=' <<<"$EVD_IN_PARAMS"; then
             args+=(--param "sca-target=file:$EVD_IN_SUBJECT_FILE")
+          fi
+          if [ "$EVD_IN_TYPE" = provenance-attestation ]; then
+            args+=(--param "attested-file=$EVD_IN_SUBJECT_FILE"
+                   --param "attestation-signer=Depthmark-Lab/test-evidences/.github/workflows/evidence.yml")
           fi
           echo "::group::🔧 What collect was asked for"
           printf '%s\n' "${args[@]}"
@@ -268,7 +336,8 @@ jobs:
     needs: collect
     # Takes the predicate by the id collect's own upload returned. An empty id would make
     # download-artifact take every artifact of the run, so without one nothing is signed.
-    if: ${{ needs.collect.outputs.predicates-id != '' }}
+    # The status is explicit: the default success() would skip sign whenever attest was skipped.
+    if: ${{ !cancelled() && needs.collect.result == 'success' && needs.collect.outputs.predicates-id != '' }}
     runs-on: ${{ fromJSON(inputs.runs-on) }}
     timeout-minutes: 10
     permissions:

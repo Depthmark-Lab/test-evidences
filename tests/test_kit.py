@@ -952,6 +952,101 @@ class BuildEvidenceTest(FileStore):
         self.assertEqual(core_evidence_type("https://evidence.acme-bank.example/sca/v1", catalog, settings), ("sca", "v1"))
 
 
+class ProvenanceAttestationTest(FileStore):
+    """GitHub's attestation of the artifact, verified with gh, then signed with the build key."""
+
+    TYPES = "provenance-attestation"
+    # gh attestation verify, recorded by scanners/record.py on the attestation of gh's own release archive.
+    RECORDED = json.loads((SCANNERS / "gh-attestation.json").read_text())
+    SIGNER = f"{REPO}/.github/workflows/evidence.yml"
+
+    def setUp(self):
+        super().setUp()
+        self.artifact = self.tmp / "hello-maven.jar"
+        self.artifact.write_bytes(b"the squad's jar")
+        self.sha256 = hashlib.sha256(b"the squad's jar").hexdigest()
+
+    def gh(self, output=None, **kwargs):
+        """A stand-in gh that answers as the recorded one did. Returns its calls' log."""
+        if output is None:
+            recorded = json.loads(json.dumps(self.RECORDED))
+            # The recording is about gh's archive: the stand-in vouches for this test's artifact instead.
+            for subject in recorded[0]["verificationResult"]["statement"]["subject"]:
+                if subject["digest"]["sha256"] == SCANNER_VERSIONS["gh"]["sha256"]:
+                    subject["digest"]["sha256"] = self.sha256
+            output = json.dumps(recorded)
+        return self.fake("gh", output, version=f"gh version {SCANNER_VERSIONS['gh']['version']} (2026-09-30)", **kwargs)
+
+    def collect_attestation(self):
+        return self.collect(self.TYPES, f"attested-file={self.artifact}", f"attestation-signer={self.SIGNER}")
+
+    def test_a_verified_attestation_is_recorded_then_signed_with_the_build_key(self):
+        calls = self.gh()
+        code, output, _ = self.collect_attestation()
+        self.assertEqual(code, 0, output)
+        predicate = self.collected("provenance-attestation")
+        self.assertEqual(predicate["result"], "pass")
+        self.assertEqual(predicate["artifact"], {"file": "hello-maven.jar", "sha256": self.sha256})
+        self.assertEqual(predicate["verifier"], {"name": "gh", "version": SCANNER_VERSIONS["gh"]["version"]})
+        self.assertEqual(predicate["policy"], {"repository": REPO, "signerWorkflow": self.SIGNER, "sourceDigest": SHA,
+                                               "predicateType": "https://slsa.dev/provenance/v1"})
+        attestation = predicate["attestations"][0]
+        self.assertEqual(attestation["signer"], "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/trunk")
+        self.assertEqual(attestation["sourceDigest"], SCANNER_VERSIONS["gh"]["commit"])
+        self.assertEqual(attestation["subjects"], [SCANNER_VERSIONS["gh"]["file"]])   # of the 21 the statement names
+        self.assertEqual([t["authority"] for t in attestation["timestamps"]], ["https://rekor.sigstore.dev"])
+        self.assertEqual(len(attestation["transparencyLogIndexes"]), 1)
+        # gh enforced the policy, with the job's token: this repository, the platform's workflow, this commit.
+        verify = [call for call in self.calls(calls) if call["argv"][:2] == ["attestation", "verify"]]
+        self.assertEqual(verify[0]["argv"], [
+            "attestation", "verify", str(self.artifact), "--repo", REPO, "--signer-workflow", self.SIGNER,
+            "--source-digest", SHA, "--predicate-type", "https://slsa.dev/provenance/v1", "--format", "json"])
+        self.assertEqual(verify[0]["env"]["GH_TOKEN"], "ghs_token")
+        # What the attestation says, never the bundle: no certificate or signature reaches the predicate.
+        bundle = self.RECORDED[0]["attestation"]["bundle"]
+        self.assertNotIn(bundle["dsseEnvelope"]["signatures"][0]["sig"], json.dumps(predicate))
+        self.assertNotIn(bundle["verificationMaterial"]["certificate"]["rawBytes"][:40], json.dumps(predicate))
+
+        code, output, _ = self.sign()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.envelope("provenance-attestation")["signatures"][0]["keyid"], "evd-build-prod-v3")
+        code, output, _ = self.verify("--subject-sha256", SUBJECT_SHA, "--types", self.TYPES)
+        self.assertEqual(code, 0, output)
+        self.assertIn("✅ provenance-attestation v1: verified · 🟢 pass · 🪪 1 GitHub attestation verified: signed by"
+                      " deployment.yml on refs/heads/trunk, logged by rekor.sigstore.dev · signed by evd-build-prod-v3",
+                      output)
+
+    def test_no_attestation_is_a_fail_and_is_signed(self):
+        """What the lab's private repository answers on GitHub's Free plan: no attestations, ever."""
+        for message in ("Error: HTTP 404: Not Found (https://api.github.com/repos/x/y/attestations/sha256:0)",
+                        "Error: no attestations found"):
+            with self.subTest(message):
+                self.gh("", exit_code=1, stderr=message)
+                code, output, _ = self.collect_attestation()
+                self.assertEqual(code, 0, output)
+                predicate = self.collected("provenance-attestation")
+                self.assertEqual((predicate["result"], predicate["summary"], predicate["attestations"]),
+                                 ("fail", {"verified": 0}, []))
+                self.assertEqual(predicate["reason"],
+                                 f"GitHub holds no provenance attestation for these bytes: {message[len('Error: '):]}")
+        code, output, _ = self.sign()
+        self.assertEqual(code, 0, output)
+        code, output, _ = self.verify("--types", self.TYPES)
+        self.assertIn("🔴 fail · 🪪 GitHub holds no attestation for these bytes", output)
+
+    def test_an_attestation_that_does_not_verify_is_an_error_not_a_fail(self):
+        self.gh("", exit_code=1, stderr=f"Error: expected SourceRepositoryDigest to be {SHA}, got {'f' * 40}")
+        code, output, _ = self.collect_attestation()
+        self.assertEqual(code, 1)
+        self.assertIn("gh could not verify GitHub's attestation for these bytes: expected SourceRepositoryDigest", output)
+        self.assertFalse((self.out / "provenance-attestation.json").exists())
+
+        self.gh("[]")
+        code, output, _ = self.collect_attestation()
+        self.assertEqual(code, 1)
+        self.assertIn("gh verified the attestations but listed none", output)
+
+
 class VerificationTest(unittest.TestCase):
     """The kit's own RSA verifier agrees with openssl."""
 
@@ -1016,6 +1111,9 @@ class DisplayTest(unittest.TestCase):
             "peer-approval/v1/examples/fail-no-pull-request.json": "👥 no pull request for this commit",
             "code-quality-gate/v1/examples/fail.json": "📏 quality gate ERROR: new_coverage",
             "custom/v1/examples/load-test.json": "📝 1 claim by acme-bank/payments: loadTest",
+            "provenance-attestation/v1/examples/gh-release.json":
+                "🪪 1 GitHub attestation verified: signed by deployment.yml on refs/heads/trunk, logged by rekor.sigstore.dev",
+            "provenance-attestation/v1/examples/private-repository.json": "🪪 GitHub holds no attestation for these bytes",
         }
         for example, line in expected.items():
             with self.subTest(example):
@@ -1089,8 +1187,12 @@ class WorkflowTest(unittest.TestCase):
 
         Returns (exit code, output, the step's outputs, python3's arguments or None).
         """
-        script = self.step(job, name).split("        run: |\n", 1)[1]
-        script = "\n".join(line[10:] for line in script.splitlines())
+        script = []
+        for line in self.step(job, name).split("        run: |\n", 1)[1].splitlines():
+            if line.strip() and not line.startswith(" " * 10):
+                break                       # a comment that heads the next step
+            script.append(line[10:])
+        script = "\n".join(script)
         recorder = self.runner_temp / "bin" / "python3"
         recorder.parent.mkdir(exist_ok=True)
         recorder.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$RUNNER_TEMP/python3-args"\n')
@@ -1107,9 +1209,9 @@ class WorkflowTest(unittest.TestCase):
                 dict(line.split("=", 1) for line in outputs.read_text().splitlines()),
                 recorded.read_text().splitlines() if recorded.exists() else None)
 
-    def test_only_the_sign_job_can_request_an_id_token(self):
+    def test_no_job_that_runs_a_collector_can_request_an_id_token(self):
         jobs = self.jobs()
-        self.assertEqual(sorted(jobs), ["collect", "sign"])
+        self.assertEqual(sorted(jobs), ["attest", "collect", "sign"])
         self.assertNotIn("id-token", jobs["collect"])
         self.assertIn("id-token: write", jobs["sign"])
         self.assertIn("needs: collect", jobs["sign"])
@@ -1117,6 +1219,37 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("args=(sign ", jobs["sign"])
         self.assertNotIn("args=(sign ", jobs["collect"])
         self.assertNotIn("install-scanners", jobs["sign"])
+        # attest holds a token too, for GitHub's Sigstore: it runs GitHub's attest action and nothing of the kit's.
+        self.assertIn("id-token: write\n      attestations: write", jobs["attest"])
+        self.assertIn("if: inputs.type == 'provenance-attestation'", jobs["attest"])
+        self.assertIn("uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2",
+                      jobs["attest"])
+        for kit in ("cli.py", "install-scanners", ".evidence-kit", "actions/checkout"):
+            self.assertNotIn(kit, jobs["attest"])
+
+    def test_collect_waits_for_the_attestation_and_sign_for_collect(self):
+        jobs = self.jobs()
+        self.assertIn("needs: attest", jobs["collect"])
+        self.assertIn("if: ${{ !cancelled() && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}",
+                      jobs["collect"])
+        self.assertIn("attestations: read", jobs["collect"])
+
+    def test_github_attests_the_file_the_platform_hashed(self):
+        subject = self.runner_temp / "subject"
+        subject.mkdir()
+        (subject / "hello-maven.jar").write_bytes(b"jar")
+        code, output, outputs, _ = self.run_step("attest", "🎯 Hash it", EVD_IN_SUBJECT_ARTIFACT="hello-maven-jar")
+        self.assertEqual((code, outputs["sha256"]), (0, hashlib.sha256(b"jar").hexdigest()), output)
+        self.assertIn("subject-digest: sha256:${{ steps.subject.outputs.sha256 }}",
+                      self.step("attest", "🪪 Have GitHub attest its build provenance"))
+
+        code, output, _, _ = self.run_step("attest", "🎯 Hash it", EVD_IN_SUBJECT_ARTIFACT="")
+        self.assertEqual(code, 1, output)
+        self.assertIn("provenance-attestation needs subject-artifact", output)
+        (subject / "notes.txt").write_text("and something else")
+        code, output, _, _ = self.run_step("attest", "🎯 Hash it", EVD_IN_SUBJECT_ARTIFACT="hello-maven-jar")
+        self.assertEqual(code, 1, output)
+        self.assertIn("must hold exactly one file, the artifact, not 2", output)
 
     def test_the_collect_job_writes_scanner_data_to_the_work_volume(self):
         jobs = self.jobs()
@@ -1131,8 +1264,10 @@ class WorkflowTest(unittest.TestCase):
         download = self.step("sign", "📥 Download the predicate")
         self.assertIn("artifact-ids: ${{ needs.collect.outputs.predicates-id }}", download)
         self.assertNotIn("name:", download)
-        # An empty id would make download-artifact take every artifact of the run.
-        self.assertIn("if: ${{ needs.collect.outputs.predicates-id != '' }}", jobs["sign"])
+        # An empty id would make download-artifact take every artifact of the run. The status is explicit:
+        # the default success() would skip sign whenever attest was skipped.
+        self.assertIn("if: ${{ !cancelled() && needs.collect.result == 'success'"
+                      " && needs.collect.outputs.predicates-id != '' }}", jobs["sign"])
         self.assertIn("EVD_IN_SHA256: ${{ needs.collect.outputs.subject-sha256 }}", jobs["sign"])
 
     def test_the_platform_hashes_the_artifact_itself(self):
@@ -1169,6 +1304,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("provenance needs subject-artifact", output)
         code, output, outputs, _ = self.run_step("collect", "🎯 Pin the subject", **{**pin, "EVD_IN_TYPE": "sca"})
         self.assertEqual((code, outputs.get("sha256")), (0, "1" * 64), output)
+        code, output, _, _ = self.run_step("collect", "🎯 Pin the subject",
+                                           **{**pin, "EVD_IN_TYPE": "provenance-attestation"})
+        self.assertEqual(code, 1, output)
+        self.assertIn("provenance-attestation needs subject-artifact", output)
 
     def test_each_call_collects_and_signs_one_type(self):
         pin = dict(EVD_IN_SHA256="1" * 64, EVD_IN_SUBJECT_ARTIFACT="", EVD_IN_SUBJECT="app")
@@ -1188,6 +1327,8 @@ class WorkflowTest(unittest.TestCase):
             self.assertIn("fail-fast: false", call, name)
             self.assertIn("type: ${{ matrix.type }}", call, name)
             self.assertNotIn("types:", call, name)
+            # GitHub checks a called workflow's permissions before any job runs: attest's included.
+            self.assertIn("id-token: write\n      attestations: write", call, name)
             self.assertIn("pattern: evidence-envelopes-*\n          merge-multiple: true", workflow, name)
 
     def test_each_type_installs_only_the_scanner_it_calls(self):
@@ -1197,23 +1338,28 @@ class WorkflowTest(unittest.TestCase):
         installer.write_text('#!/bin/sh\necho "$@" >>"$RUNNER_TEMP/installed"\nmkdir -p "$1"\n'
                              'printf \'#!/bin/sh\\necho trufflehog 3.99.9\\n\' >"$1/trufflehog"\n'
                              'printf \'#!/bin/sh\\necho "Application: grype"\\necho "Version: 0.121.0"\\n\' >"$1/grype"\n'
+                             'printf \'#!/bin/sh\\necho "gh version 2.102.0 (2026-09-30)"\\necho https://github.com\\n\' >"$1/gh"\n'
                              'chmod 755 "$1"/*\n')
         installer.chmod(0o755)
         installed = self.runner_temp / "installed"
         bin_dir = self.runner_temp / "scanners" / "bin"
-        for type_id, scanner, shown in (("secret-detection", "trufflehog", "TruffleHog 3.99.9"),
-                                        ("sca", "grype", "Grype 0.121.0")):
+        summary = self.runner_temp / "step-summary"
+        for type_id, tool, role, shown in (("secret-detection", "trufflehog", "Scanner", "TruffleHog 3.99.9"),
+                                           ("sca", "grype", "Scanner", "Grype 0.121.0"),
+                                           ("provenance-attestation", "gh", "Verifier", "gh 2.102.0")):
             installed.unlink(missing_ok=True)
-            code, output, _, _ = self.run_step("collect", "🧰 Install the scanner", EVD_IN_TYPE=type_id)
+            summary.unlink(missing_ok=True)
+            code, output, _, _ = self.run_step("collect", "🧰 Install the tool the collector calls", EVD_IN_TYPE=type_id)
             self.assertEqual(code, 0, output)
-            self.assertEqual(installed.read_text(), f"{bin_dir} {scanner}\n")
+            self.assertEqual(installed.read_text(), f"{bin_dir} {tool}\n")
             self.assertIn(f"🧰 {shown}, its archive checked against its pinned SHA-256", output)
+            self.assertIn(f"🧰 **{role}** {shown}, its archive", summary.read_text())
         for type_id in ("test-results", "provenance", "peer-approval", "custom"):
             installed.unlink(missing_ok=True)
-            code, output, _, _ = self.run_step("collect", "🧰 Install the scanner", EVD_IN_TYPE=type_id)
+            code, output, _, _ = self.run_step("collect", "🧰 Install the tool the collector calls", EVD_IN_TYPE=type_id)
             self.assertEqual(code, 0, output)
             self.assertFalse(installed.exists(), type_id)
-            self.assertIn(f"🧰 {type_id} calls no scanner", output)
+            self.assertIn(f"🧰 {type_id} calls no tool", output)
 
     def test_the_collect_step_says_where_the_artifact_and_the_reports_are(self):
         step = dict(EVD_IN_TYPE="sca", EVD_IN_PARAMS="", EVD_IN_SUBJECT_FILE="/work/subject/app.jar",
@@ -1241,18 +1387,32 @@ class WorkflowTest(unittest.TestCase):
         # But never test-results at files of its choosing, such as a report committed to the repository.
         code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_PARAMS": "test-reports=fake"})
         self.assertEqual((code, args), (1, None), output)
-        self.assertIn("test-reports is set by evidence.yml from reports-artifact", output)
+        self.assertIn("test-reports is set by evidence.yml, not by the caller", output)
 
         code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_REPORTS": ""})
         self.assertEqual((code, args), (1, None), output)
         self.assertIn("test-results needs reports-artifact", output)
 
+        # GitHub's attestation must be of the file the platform downloaded, signed by the platform's workflow.
+        step["EVD_IN_TYPE"] = "provenance-attestation"
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **step)
+        self.assertEqual(code, 0, output)
+        self.assertIn("attested-file=/work/subject/app.jar", args)
+        self.assertIn("attestation-signer=Depthmark-Lab/test-evidences/.github/workflows/evidence.yml", args)
+        for param in ("attested-file=/tmp/other.jar", "attestation-signer=squad/repo/.github/workflows/own.yml"):
+            code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_PARAMS": param})
+            self.assertEqual((code, args), (1, None), output)
+            self.assertIn(f"{param.split('=')[0]} is set by evidence.yml, not by the caller", output)
+
     def test_the_installed_scanners_are_the_recorded_ones(self):
         script = (REPO_ROOT / "scripts" / "install-scanners.sh").read_text()
-        pinned = dict(re.findall(r'(?m)^(TRUFFLEHOG|GRYPE)_VERSION="([^"]+)"', script))
-        self.assertEqual({"trufflehog": pinned["TRUFFLEHOG"], "grype": pinned["GRYPE"]},
-                         {name: SCANNER_VERSIONS[name] for name in ("trufflehog", "grype")})
-        self.assertEqual(len(re.findall(r'(?m)^(?:TRUFFLEHOG|GRYPE)_SHA256="[0-9a-f]{64}"$', script)), 2)
+        pinned = dict(re.findall(r'(?m)^(TRUFFLEHOG|GRYPE|GH)_VERSION="([^"]+)"', script))
+        self.assertEqual({"trufflehog": pinned["TRUFFLEHOG"], "grype": pinned["GRYPE"], "gh": pinned["GH"]},
+                         {"trufflehog": SCANNER_VERSIONS["trufflehog"], "grype": SCANNER_VERSIONS["grype"],
+                          "gh": SCANNER_VERSIONS["gh"]["version"]})
+        self.assertEqual(len(re.findall(r'(?m)^(?:TRUFFLEHOG|GRYPE|GH)_SHA256="[0-9a-f]{64}"$', script)), 3)
+        # The recording verified the very archive install-scanners.sh pins.
+        self.assertIn(f'GH_SHA256="{SCANNER_VERSIONS["gh"]["sha256"]}"', script)
 
 
 if __name__ == "__main__":

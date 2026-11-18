@@ -95,10 +95,13 @@ jobs:
       matrix:
         type: ${{ fromJSON(needs.build.outputs.types) }}
     uses: ./.github/workflows/evidence.yml
+    # attestations: write for evidence.yml's attest job, which provenance-attestation runs. GitHub
+    # checks a called workflow's permissions before any job runs, so every caller grants it.
     permissions:
       contents: read
       pull-requests: read
       id-token: write
+      attestations: write
     with:
       type: ${{ matrix.type }}
       subject-repo-path: lab-artifacts/sample-app/${{ github.run_number }}/sample-app.tar.gz

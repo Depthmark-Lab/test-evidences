@@ -69,6 +69,17 @@ def facts(type_id, predicate):
                 "/attempts/")
             return (f"🏗️ {workflow['path'].rsplit('/', 1)[-1]} on {workflow['ref']}, commit {commit[:12]},"
                     f" run {run} attempt {attempt}")
+        if type_id == "provenance-attestation":
+            found = predicate["attestations"]
+            if not found:
+                return "🪪 GitHub holds no attestation for these bytes"
+            signer, _, ref = found[0]["signer"].partition("@")
+            signer = signer.rsplit("/", 1)[-1]
+            config = found[0]["buildConfig"].partition("@")[0].rsplit("/", 1)[-1]
+            logged = ", ".join(dict.fromkeys(t["authority"].split("//")[-1].split("/")[0] or t["type"]
+                                             for t in found[0]["timestamps"]))
+            return (f"🪪 {plural(len(found), 'GitHub attestation')} verified: signed by {signer} on {ref}"
+                    f"{' for ' + config if config and config != signer else ''}{', logged by ' + logged if logged else ''}")
         if type_id == "peer-approval":
             if not predicate["pullRequest"]:
                 return "👥 no pull request for this commit"

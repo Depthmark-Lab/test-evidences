@@ -95,12 +95,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        type: [secret-detection, sca, test-results, provenance]
+        type: [secret-detection, sca, test-results, provenance, provenance-attestation]
     uses: ./.github/workflows/evidence.yml
+    # attestations: write for evidence.yml's attest job, which provenance-attestation runs. GitHub
+    # checks a called workflow's permissions before any job runs, so every caller grants it.
     permissions:
       contents: read
       pull-requests: read
       id-token: write
+      attestations: write
     with:
       type: ${{ matrix.type }}
       subject-repo-path: lab-artifacts/hello-node/${{ github.run_number }}/hello-node.tar.gz
@@ -110,7 +113,9 @@ jobs:
       params: ${{ matrix.type == 'secret-detection' && 'secrets-path=samples/hello-node' || '' }}
 
   verify:
-    needs: evidence
+    needs: [build, evidence]
+    # Also when a type failed: verify then says which envelopes hold and which type is missing.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: [self-hosted, talos, lab]
     timeout-minutes: 10
     permissions:
@@ -140,5 +145,5 @@ jobs:
           sha256=$(sha256sum "$RUNNER_TEMP/artifact/hello-node.tar.gz" | cut -d' ' -f1)
           echo "🔒 SHA-256 of the bundle, computed by the consumer: $sha256"
           python3 evidence/cli.py verify --envelopes "$RUNNER_TEMP/envelopes" --keys trusted-keys \
-            --subject-sha256 "$sha256" --types secret-detection,sca,test-results,provenance
-          echo "::notice title=✅ hello-node.tar.gz verified::4 signed statements about sha256 $sha256 hold with the trusted public keys"
+            --subject-sha256 "$sha256" --types secret-detection,sca,test-results,provenance,provenance-attestation
+          echo "::notice title=✅ hello-node.tar.gz verified::5 signed statements about sha256 $sha256 hold with the trusted public keys"
