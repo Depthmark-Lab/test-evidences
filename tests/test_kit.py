@@ -5,7 +5,9 @@ Run from the repository root:  python3 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -15,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EVIDENCE = REPO_ROOT / "evidence"
@@ -23,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cli  # noqa: E402
 import collection  # noqa: E402
+import display  # noqa: E402
 import schema  # noqa: E402
 import signing  # noqa: E402
 import verification  # noqa: E402
@@ -146,7 +150,7 @@ class KitTest(Kit):
         self.assertEqual([a["login"] for a in approval["predicate"]["approvers"]], ["bob"])
         self.assertEqual(self.deployed("code-quality-gate")[0]["statement"]["predicate"]["analysisId"], "AX-1")
         self.assertEqual(self.deployed("custom")[0]["statement"]["predicate"]["declaredBy"], REPO)
-        self.assertIn("| peer-approval | v1 | attached | pass |", summary)
+        self.assertIn("| ✅ | `peer-approval` v1 | 🟢 pass | 👥 1 approval on pull request #7 |", summary)
 
     def test_one_login_per_key_family_and_one_jfrog_exchange(self):
         self.run_all()
@@ -190,7 +194,7 @@ class KitTest(Kit):
         gate = self.deployed("code-quality-gate")[0]
         self.assertTrue(gate["verified"])
         self.assertEqual(gate["statement"]["predicate"]["result"], "fail")
-        self.assertIn("| code-quality-gate | v1 | attached | fail |", summary)
+        self.assertIn("| ✅ | `code-quality-gate` v1 | 🔴 fail | 📏 quality gate ERROR: new\\_coverage |", summary)
 
     def test_enforce_blocks_on_a_failed_check_but_still_attaches_it(self):
         self.services.gate_status = "ERROR"
@@ -221,7 +225,7 @@ class KitTest(Kit):
         self.assertIn("SonarQube has no analysis of commit", output)
         self.assertEqual(self.deployed("code-quality-gate"), [])
         self.assertEqual(len(self.services.deployed), 2)
-        self.assertIn("| code-quality-gate | v1 | error |", summary)
+        self.assertIn("| ❌ | `code-quality-gate` v1 | | | the facts could not be established", summary)
 
     def test_bad_requests_are_rejected_before_any_token_is_requested(self):
         cases = [
@@ -299,7 +303,7 @@ class ScannerTest(Kit):
 
     def test_secret_detection_records_where_secrets_are_never_the_secrets(self):
         calls = self.fake("trufflehog", TRUFFLEHOG_OUTPUT)
-        code, output, _ = self.collect("secret-detection")
+        code, output, summary = self.collect("secret-detection")
         self.assertEqual(code, 0, output)
         predicate = self.collected("secret-detection")
         self.assertEqual(predicate["result"], "fail")
@@ -309,7 +313,8 @@ class ScannerTest(Kit):
                          [("SlackWebhook", "config/settings.py", 1), ("PrivateKey", "deploy-key.pem", 1)])
         # The recording holds this marker wherever TruffleHog printed the secret.
         self.assertIn(REMOVED_SECRET, TRUFFLEHOG_OUTPUT)
-        self.assertNotIn(REMOVED_SECRET, json.dumps(predicate) + output)
+        self.assertNotIn(REMOVED_SECRET, json.dumps(predicate) + output + summary)
+        self.assertIn("| ✅ | `secret-detection` v1 | 🔴 fail | 🔑 2 secrets found: 2 unverified |", summary)
         argv = self.calls(calls)[-1]["argv"]
         self.assertEqual(argv[:5] + argv[7:],
                          ["filesystem", ".", "--json", "--no-update", "--local-dev", "--no-verification"])
@@ -572,7 +577,7 @@ class FileStoreTest(FileStore):
             self.assertEqual(statement["subject"], [{"name": SUBJECT, "digest": {"sha256": SUBJECT_SHA}}])
             self.assertEqual(statement["predicateType"], f"https://evidence.acme-bank.example/{type_id}/v1")
             self.assertEqual(statement["predicate"], self.collected(type_id))
-        self.assertIn("| peer-approval | v1 | signed | pass | evd-approval-prod-v3 |", summary)
+        self.assertIn("| ✅ | `peer-approval` v1 | 🟢 pass | 👥 1 approval on pull request #7 | `evd-approval-prod-v3` |", summary)
         self.assertEqual(sorted(self.services.sign_calls), ["evd-approval-prod", "evd-self-prod"])
         self.assertEqual((self.services.jfrog_exchanges, self.services.deployed), ([], []))
 
@@ -654,8 +659,15 @@ class FileStoreTest(FileStore):
         self.collect_and_sign()
         code, output, summary = self.verify("--subject-sha256", SUBJECT_SHA, "--types", self.TYPES)
         self.assertEqual(code, 0, output)
-        self.assertIn("| custom | v1 | verified | n/a | evd-self-prod-v3 |", summary)
-        self.assertIn("| peer-approval | v1 | verified | pass | evd-approval-prod-v3 |", summary)
+        self.assertIn("| ✅ | `custom` v1 | ⚪ n/a | 📝 1 claim by acme-bank/payments: loadTest | `evd-self-prod-v3` |", summary)
+        self.assertIn("| ✅ | `peer-approval` v1 | 🟢 pass | 👥 1 approval on pull request #7 | `evd-approval-prod-v3` |", summary)
+        self.assertIn(f"🎯 `{SUBJECT}` · SHA-256 `{SUBJECT_SHA}`", summary)
+        self.assertIn("**2 of 2 verified · 🟢 1 pass · ⚪ 1 n/a**", summary)
+        # Each verified statement follows, folded: what a reviewer reads, after the signature held.
+        self.assertIn("<details><summary>✅ <code>custom</code> v1 · ⚪ n/a · 📝 1 claim by acme-bank/payments: loadTest"
+                      " · signed by <code>evd-self-prod-v3</code></summary>", summary)
+        self.assertIn('"p95Ms": 180', summary)
+        self.assertIn("::group::🧾 peer-approval v1: the verified statement", output)
 
     def test_verify_needs_no_vault_and_no_jfrog(self):
         self.collect_and_sign()
@@ -848,8 +860,9 @@ class BuildEvidenceTest(FileStore):
 
         code, output, _ = self.verify("--subject-sha256", SUBJECT_SHA, "--types", self.TYPES)
         self.assertEqual(code, 0, output)
-        self.assertIn("provenance v1: verified, result n/a, signed by evd-build-prod-v3", output)
-        self.assertIn("test-results v1: verified, result pass, signed by evd-build-prod-v3", output)
+        self.assertIn("✅ provenance v1: verified · ⚪ n/a · 🏗️ hello-maven.yml on refs/heads/main, commit aaaaaaaaaaaa,"
+                      " run 44001716002 attempt 2 · signed by evd-build-prod-v3", output)
+        self.assertIn("✅ test-results v1: verified · 🟢 pass · 🧪 4 tests: 4 passed · signed by evd-build-prod-v3", output)
 
     def test_a_scan_key_cannot_vouch_for_build_evidence(self):
         self.collect_build()
@@ -913,6 +926,79 @@ class VerificationTest(unittest.TestCase):
             verification.load_public_key(ec_public)
 
 
+class DisplayTest(unittest.TestCase):
+    """What a job's log and step summary say about evidence. Squads write some of it, so it is escaped."""
+
+    def report(self, rows, **kwargs):
+        summary = Path(tempfile.mkdtemp(prefix="evidence-summary-")) / "summary.md"
+        self.addCleanup(shutil.rmtree, summary.parent, ignore_errors=True)
+        printed = io.StringIO()
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": str(summary)}), \
+                contextlib.redirect_stdout(printed):
+            display.report(rows, "heading", "verified", "signed by", "Signed by", **kwargs)
+        return printed.getvalue(), summary.read_text()
+
+    def test_each_type_says_what_it_found_in_one_line(self):
+        expected = {
+            "secret-detection/v1/examples/pass.json": "🔑 no secrets found",
+            "secret-detection/v1/examples/fail.json": "🔑 2 secrets found: 2 unverified",
+            "sca/v2/examples/pass.json": "🐞 no known vulnerabilities",
+            "sca/v2/examples/fail.json": "🐞 13 vulnerabilities: 2 critical, 2 high, 9 medium (fails on high)",
+            "test-results/v1/examples/pass.json": "🧪 4 tests: 4 passed",
+            "test-results/v1/examples/fail.json": "🧪 8 tests: 5 passed, 1 failed, 1 errored, 1 skipped, 1 flaky",
+            "provenance/v1/examples/hello-maven.json":
+                "🏗️ hello-maven.yml on refs/heads/main, commit 3affa072b111, run 44001716002 attempt 1",
+            "peer-approval/v1/examples/pass.json": "👥 1 approval on pull request #7",
+            "peer-approval/v1/examples/fail-no-pull-request.json": "👥 no pull request for this commit",
+            "code-quality-gate/v1/examples/fail.json": "📏 quality gate ERROR: new_coverage",
+            "custom/v1/examples/load-test.json": "📝 1 claim by acme-bank/payments: loadTest",
+        }
+        for example, line in expected.items():
+            with self.subTest(example):
+                type_id = example.split("/", 1)[0]
+                predicate = json.loads((EVIDENCE / "collectors" / example).read_text())
+                self.assertEqual(display.facts(type_id, predicate), line)
+
+    def test_a_shape_it_does_not_know_shows_the_summary_counts(self):
+        self.assertEqual(display.facts("new-type", {"summary": {"checked": 3, "skipped": 1, "complete": True}}),
+                         "3 checked, 1 skipped")
+        self.assertEqual(display.facts("provenance", {"buildDefinition": {}}), "")
+
+    def test_what_squads_wrote_cannot_break_the_table_or_add_markup(self):
+        claims = {"a | b <img src=x onerror=alert(1)> [link](https://evil.example)": 1}
+        rows = [{"type": "custom", "version": "v1", "status": "verified", "result": "n/a", "detail": "key`|`id",
+                 "predicate": {"declaredBy": "squad", "claims": claims}},
+                {"type": "sca", "version": "", "status": "error", "result": "n/a", "detail": "<b>|</b>\nsecond line"}]
+        _, summary = self.report(rows)
+        table = [line for line in summary.splitlines() if line.startswith(("| ✅", "| ❌"))]
+        self.assertEqual(len(table), 2)
+        for line in table:
+            self.assertEqual(len(re.findall(r"(?<!\\)\|", line)), 6, line)   # five columns, no more
+        # Escaped with a backslash, they show as text.
+        self.assertNotRegex(summary, r"(?<!\\)<(img|b|/b)[ >]")
+        self.assertNotRegex(summary, r"(?<!\\)\[link")
+        self.assertIn(r"\<img src=x onerror=alert(1)\>", summary)
+
+    def test_a_verified_statement_is_folded_and_cut_when_it_is_large(self):
+        predicate = {"result": "fail", "note": "```", "findings": [{"id": f"CVE-2026-{n:05}"} for n in range(5000)]}
+        statement = {"predicateType": "https://example/sca/v2", "predicate": predicate,
+                     "subject": [{"name": "app.jar", "digest": {"sha256": "0" * 64}}]}
+        rows = [{"type": "sca", "version": "v2", "status": "verified", "result": "fail", "detail": "evd-scan-lab-v1",
+                 "predicate": predicate, "statement": statement}]
+        printed, summary = self.report(rows, subject=("app.jar", "0" * 64), statements=True)
+        self.assertIn("<details><summary>✅ <code>sca</code> v2 · 🔴 fail", summary)
+        self.assertIn("\n````json\n", summary)      # longer than any backtick run in the predicate
+        self.assertIn("Cut at 20,000 characters", summary)
+        self.assertLess(len(summary), display.STATEMENT_LIMIT + 2000)
+        self.assertIn("::group::🧾 sca v2: the verified statement", printed)
+
+    def test_errors_are_annotations_encoded_as_github_reads_them(self):
+        printed = io.StringIO()
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), contextlib.redirect_stdout(printed):
+            display.announce("error", "50% done:\n then, stopped", title="sca v2: scan, failed")
+        self.assertEqual(printed.getvalue(), "::error title=sca v2%3A scan%2C failed::50%25 done: then, stopped\n")
+
+
 class WorkflowTest(unittest.TestCase):
     """The reusable workflow keeps scanners away from the signing token, and pins what the evidence is about."""
 
@@ -949,7 +1035,8 @@ class WorkflowTest(unittest.TestCase):
         (self.runner_temp / "python3-args").unlink(missing_ok=True)
         done = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True, env={
             "PATH": f"{recorder.parent}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(self.runner_temp),
-            "GITHUB_OUTPUT": str(outputs), "GITHUB_WORKSPACE": str(self.runner_temp), **env})
+            "GITHUB_OUTPUT": str(outputs), "GITHUB_WORKSPACE": str(self.runner_temp),
+            "GITHUB_STEP_SUMMARY": str(self.runner_temp / "step-summary"), **env})
         recorded = self.runner_temp / "python3-args"
         return (done.returncode, done.stdout + done.stderr,
                 dict(line.split("=", 1) for line in outputs.read_text().splitlines()),
@@ -975,8 +1062,8 @@ class WorkflowTest(unittest.TestCase):
         """A caller job of the same run could upload its own evidence-predicates before collect runs."""
         jobs = self.jobs()
         self.assertIn("predicates-id: ${{ steps.hand-off.outputs.artifact-id }}", jobs["collect"])
-        self.assertIn("id: hand-off", self.step("collect", "Hand the predicates to the sign job"))
-        download = self.step("sign", "Download the predicates")
+        self.assertIn("id: hand-off", self.step("collect", "📤 Hand the predicates to the sign job"))
+        download = self.step("sign", "📥 Download the predicates")
         self.assertIn("artifact-ids: ${{ needs.collect.outputs.predicates-id }}", download)
         self.assertNotIn("name:", download)
         # Without an id there is nothing to sign: the collect runner died, or collected nothing.
@@ -988,49 +1075,55 @@ class WorkflowTest(unittest.TestCase):
         subject.mkdir()
         (subject / "hello-maven.jar").write_bytes(b"jar")
         sha256 = hashlib.sha256(b"jar").hexdigest()
-        pin = dict(EVD_IN_TYPES="sca, provenance", EVD_IN_SHA256="", EVD_IN_SUBJECT_ARTIFACT="hello-maven-jar")
+        pin = dict(EVD_IN_TYPES="sca, provenance", EVD_IN_SHA256="", EVD_IN_SUBJECT_ARTIFACT="hello-maven-jar",
+                   EVD_IN_SUBJECT="lab/hello|<b>`x`</b>.jar")
 
-        code, output, outputs, _ = self.run_step("collect", "Pin the subject", **pin)
+        code, output, outputs, _ = self.run_step("collect", "🎯 Pin the subject", **pin)
         self.assertEqual(code, 0, output)
         self.assertEqual((outputs["sha256"], outputs["file"]), (sha256, str(subject / "hello-maven.jar")))
+        self.assertIn(f"🔒 SHA-256 computed here, from the downloaded file: {sha256}", output)
+        summary = (self.runner_temp / "step-summary").read_text()
+        self.assertIn(f"| 🔒 SHA-256 | `{sha256}`, computed here, from the downloaded file |", summary)
+        self.assertIn("| 📦 Artifact | `hello-maven.jar`, 3 bytes, from the artifact `hello-maven-jar` of this run |", summary)
+        self.assertIn("| 🏷️ Name | `lab/hellobx/b.jar` |", summary)   # what the caller named loses its markup
 
-        code, output, _, _ = self.run_step("collect", "Pin the subject", **{**pin, "EVD_IN_SHA256": "1" * 64})
+        code, output, _, _ = self.run_step("collect", "🎯 Pin the subject", **{**pin, "EVD_IN_SHA256": "1" * 64})
         self.assertEqual(code, 1, output)
         self.assertIn(f"holds a file with SHA-256 {sha256}", output)
 
         (subject / "notes.txt").write_text("and something else")
-        code, output, _, _ = self.run_step("collect", "Pin the subject", **pin)
+        code, output, _, _ = self.run_step("collect", "🎯 Pin the subject", **pin)
         self.assertEqual(code, 1, output)
         self.assertIn("must hold exactly one file, the artifact, not 2", output)
 
     def test_provenance_needs_an_artifact_the_platform_downloaded(self):
-        pin = dict(EVD_IN_TYPES="sca,provenance", EVD_IN_SHA256="1" * 64, EVD_IN_SUBJECT_ARTIFACT="")
-        code, output, _, _ = self.run_step("collect", "Pin the subject", **pin)
+        pin = dict(EVD_IN_TYPES="sca,provenance", EVD_IN_SHA256="1" * 64, EVD_IN_SUBJECT_ARTIFACT="", EVD_IN_SUBJECT="app")
+        code, output, _, _ = self.run_step("collect", "🎯 Pin the subject", **pin)
         self.assertEqual(code, 1, output)
         self.assertIn("provenance needs subject-artifact", output)
-        code, output, outputs, _ = self.run_step("collect", "Pin the subject", **{**pin, "EVD_IN_TYPES": "sca"})
+        code, output, outputs, _ = self.run_step("collect", "🎯 Pin the subject", **{**pin, "EVD_IN_TYPES": "sca"})
         self.assertEqual((code, outputs.get("sha256")), (0, "1" * 64), output)
 
     def test_the_collect_step_says_where_the_artifact_and_the_reports_are(self):
         step = dict(EVD_IN_TYPES="sca,test-results", EVD_IN_PARAMS="", EVD_IN_SUBJECT_FILE="/work/subject/app.jar",
                     EVD_IN_REPORTS="hello-maven-test-reports")
-        code, output, _, args = self.run_step("collect", "Collect", **step)
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **step)
         self.assertEqual(code, 0, output)
         self.assertIn("sca-target=file:/work/subject/app.jar", args)
         self.assertIn(f"test-reports={self.runner_temp}/reports", args)
 
         # The caller may point sca at something else: the predicate records what was scanned.
-        code, output, _, args = self.run_step("collect", "Collect", **{**step, "EVD_IN_PARAMS": "sca-target=dir:."})
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_PARAMS": "sca-target=dir:."})
         self.assertEqual(code, 0, output)
         self.assertIn("sca-target=dir:.", args)
         self.assertNotIn("sca-target=file:/work/subject/app.jar", args)
 
         # But never test-results at files of its choosing, such as a report committed to the repository.
-        code, output, _, args = self.run_step("collect", "Collect", **{**step, "EVD_IN_PARAMS": "test-reports=fake"})
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_PARAMS": "test-reports=fake"})
         self.assertEqual((code, args), (1, None), output)
         self.assertIn("test-reports is set by evidence.yml from reports-artifact", output)
 
-        code, output, _, args = self.run_step("collect", "Collect", **{**step, "EVD_IN_REPORTS": ""})
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_REPORTS": ""})
         self.assertEqual((code, args), (1, None), output)
         self.assertIn("test-results needs reports-artifact", output)
 

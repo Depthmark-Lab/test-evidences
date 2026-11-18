@@ -62,6 +62,7 @@ evidence/
   collection.py                  evidence side: runs a collector, validates its predicate
   signing.py                     signing side: identity, Vault, JFrog, DSSE envelopes
   verification.py                consumer side: checks envelopes with public keys only
+  display.py                     what collect, sign and verify print and add to the run's summary page
   core.py, schema.py             shared helpers, JSON Schema subset validator
   evidence_sdk.py                helpers for collectors
   collectors/<type>/<version>/   collect.py, schema.json, examples/
@@ -70,7 +71,7 @@ scripts/show-envelopes.py        prints what envelopes say: key id, subject, pre
 samples/hello-{maven,python,node} Hello World web services with unit tests, as squads would write them
 trusted-keys/                    public keys from Transit, one per key version
 demo/predicate.json              what the demo declares through the custom type
-tests/                           72 tests against stand-in services, recorded scanner output and recorded JUnit XML
+tests/                           77 tests against stand-in services, recorded scanner output and recorded JUnit XML
 action.yml, Dockerfile           the one-job and container forms of the kit
 ```
 
@@ -125,12 +126,12 @@ python3 scripts/show-envelopes.py /tmp/envelopes/*.dsse.json
 
 ## What was tested
 
-- The 72 tests: the kit against stand-in GitHub, Vault, JFrog and SonarQube, scanners replaying recorded output, JUnit XML that Surefire, pytest and Node wrote for the samples (passing, failing, erroring, skipped and flaky), both stores, the collect and sign split, verification against openssl, and `evidence.yml`: its shape, and its subject and parameter steps run with bash.
+- The 77 tests: the kit against stand-in GitHub, Vault, JFrog and SonarQube, scanners replaying recorded output, JUnit XML that Surefire, pytest and Node wrote for the samples (passing, failing, erroring, skipped and flaky), both stores, the collect and sign split, verification against openssl, the step summaries (one line of facts per type, and Markdown escaped where squads wrote the text), and `evidence.yml`: its shape, and its subject and parameter steps run with bash.
 - In the runner image `ghcr.io/actions/actions-runner:2.338.2`, capped at 512Mi and 1 CPU: `install-scanners.sh`, and `collect` with the real TruffleHog and Grype on the sample app. With the work directory on a volume, as on the runners, the cold `sca` run wrote 3.3 GB there and 196 KB to the container itself. At 384Mi it was OOM-killed.
 - Against a local `vault server -dev`: `bootstrap.sh` and `apply.sh` with the new roles, JWT login with GitHub-shaped tokens, signing with PKCS#1 v1.5 and PSS, `verify`, openssl, and every refusal: another workflow or branch, a GitHub-hosted runner, the wrong audience, a scan token using the self key, exporting a key.
 - The samples end to end, on 2026-11-17: each built and tested with its real toolchain, then `collect` in the runner image with the real TruffleHog and Grype on the jar and the bundles, then `sign` through a local Vault set up by `bootstrap.sh` and `apply.sh` with the build family, then `verify` and openssl: 12 envelopes, each with its family's key. The squad's own workflow was refused a token, and a jar changed by one byte matched none of its evidence. The Maven jar is reproducible: the same SHA-256 from two different builds, and from the runner.
 
-On the Talos runners: `ci` passed on `gha-runner-scale-set-lab` in `rg-talos-lab` on 2026-11-16, so the runner group admits this repository, and `demo` collected all four types at 512Mi on 2026-11-17 before Vault refused its branch. The `hello-*` workflows first ran on 2026-11-17 (PR #3): `setup-java` and `setup-python` worked and the Maven and Python builds passed, `setup-node` failed for Node 26 (the image lacks `libatomic.so.1`, so the sample now uses Node 24), and TruffleHog's two processes got both collect runners OOM-killed (the collector now passes `--local-dev`). Not run yet: a signature from the runners, and the Node build on them.
+On the Talos runners: `ci` passed on `gha-runner-scale-set-lab` in `rg-talos-lab` on 2026-11-16, so the runner group admits this repository, and `demo` collected all four types at 512Mi on 2026-11-17 before Vault refused its branch. The `hello-*` workflows first ran on 2026-11-17 (PR #3): `setup-java` and `setup-python` worked and the Maven and Python builds passed, `setup-node` failed for Node 26 (the image lacks `libatomic.so.1`, so the sample now uses Node 24), and TruffleHog's two processes got both collect runners OOM-killed (the collector now passes `--local-dev`). The second push the same day (commit e087073, runs 44203875582, 44203875573 and 44203875527) built, collected and signed all three samples on the runners: 12 envelopes, signed by Vault Transit with the scan and build keys. Their `verify` jobs failed only because `trusted-keys/evd-build-lab-v1.pub.pem` was not committed yet: `bootstrap.sh` had written it outside the worktree. With that file, all 12 verify, and openssl agrees.
 
 ## Differences from the bank kit
 

@@ -35,6 +35,7 @@ import schema as schemas  # noqa: E402
 import signing  # noqa: E402
 import verification  # noqa: E402
 from core import EvidenceError, load_json, predicate_type  # noqa: E402
+from display import announce, report  # noqa: E402
 from version import __version__  # noqa: E402
 
 COLLECTORS = collection.COLLECTORS
@@ -138,7 +139,8 @@ def process(types, catalog, produce, status, finish):
         row = {"type": type_id, "version": entry["current"]}
         try:
             predicate = produce(type_id, entry)
-            row.update(status=status, result=predicate.get("result", "n/a"), detail=finish(type_id, entry, predicate))
+            row.update(status=status, result=predicate.get("result", "n/a"), detail=finish(type_id, entry, predicate),
+                       predicate=predicate)
         except EvidenceError as exc:
             # One type failing must not stop the others.
             row.update(status="error", result="n/a", detail=str(exc))
@@ -176,8 +178,13 @@ def cmd_run(args):
 
     with tempfile.TemporaryDirectory(prefix="evidence-") as workdir:
         rows = process(types, catalog, collector(settings, params, from_vault, workdir), status, store)
-    report(rows, f"Evidence for `{args.subject_repo_path}`", "Signing key or error", done_as)
+    report(rows, signed_heading(status), status, done_as, "Signed by",
+           subject=(args.subject_repo_path, args.subject_sha256))
     return outcome(rows, args.enforce)
+
+
+def signed_heading(status):
+    return "🔏 Evidence signed with Vault Transit" + (", attached in JFrog" if status == "attached" else "")
 
 
 def cmd_collect(args):
@@ -196,11 +203,12 @@ def cmd_collect(args):
     def write(type_id, _entry, predicate):
         path = out / f"{type_id}.json"
         write_json(path, predicate)
-        return str(path)
+        return path.name
 
     with tempfile.TemporaryDirectory(prefix="evidence-") as workdir:
         rows = process(types, catalog, collector(settings, params, from_environment, workdir), "collected", write)
-    report(rows, "Evidence collected, not signed", "File or error", "written to")
+    print(f"📁 Predicates go to {out}", flush=True)
+    report(rows, "🔎 Evidence collected, not signed yet", "collected", "written to", "Written to")
     return 1 if any(row["status"] == "error" for row in rows) else 0
 
 
@@ -232,7 +240,8 @@ def cmd_sign(args):
     vault = signing.Vault(settings)
     store, status, done_as = make_store(settings, args, vault)
     rows = process(types, catalog, from_file, status, store)
-    report(rows, f"Evidence for `{args.subject_repo_path}`", "Signing key or error", done_as)
+    report(rows, signed_heading(status), status, done_as, "Signed by",
+           subject=(args.subject_repo_path, args.subject_sha256))
     return outcome(rows, args.enforce)
 
 
@@ -255,7 +264,7 @@ def cmd_verify(args):
             if type_id != row["type"]:
                 raise EvidenceError(f"the file is named for {row['type']} but holds {type_id} evidence")
             row.update(version=version, status="verified", result=statement["predicate"].get("result", "n/a"),
-                       detail=key_id)
+                       detail=key_id, predicate=statement["predicate"], statement=statement)
         except (EvidenceError, ValueError) as exc:
             row.update(status="error", detail=str(exc))
         rows.append(row)
@@ -263,7 +272,10 @@ def cmd_verify(args):
         if not any(row["type"] == type_id for row in rows):
             rows.append({"type": type_id, "version": "", "status": "error", "result": "n/a",
                          "detail": "no envelope for this type"})
-    report(rows, "Evidence verified with trusted public keys", "Signing key or error", "signed by")
+    subjects = [row["statement"]["subject"][0] for row in rows if row.get("statement")]
+    subject = (subjects[0]["name"], subjects[0]["digest"]["sha256"]) if subjects else None
+    report(rows, "🛡️ Evidence verified with trusted public keys", "verified", "signed by", "Signed by",
+           subject=subject, statements=True)
     return outcome(rows, args.enforce)
 
 
@@ -271,31 +283,6 @@ def write_json(path, value):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(value, handle, indent=2, sort_keys=True)
         handle.write("\n")
-
-
-def announce(level, message):
-    message = " ".join(str(message).split())
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print(f"::{level}::{message}", flush=True)
-    else:
-        print(f"{level}: {message}", file=sys.stderr, flush=True)
-
-
-def report(rows, heading, detail_heading, done_as):
-    for row in rows:
-        if row["status"] == "error":
-            announce("error", f"{row['type']}: {row['detail']}")
-        else:
-            print(f"{row['type']} {row['version']}: {row['status']}, result {row['result']}, {done_as} {row['detail']}",
-                  flush=True)
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        lines = [f"### {heading}", "",
-                 f"| Type | Version | Evidence | Result | {detail_heading} |", "|---|---|---|---|---|"]
-        lines += [f"| {r['type']} | {r['version']} | {r['status']} | {r['result']} | {str(r['detail']).replace('|', '/')} |"
-                  for r in rows]
-        with open(summary, "a", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
 
 
 # ---- list, check, lock -------------------------------------------------------
@@ -412,6 +399,7 @@ def find_problems():
     independent = [(path, "Evidence logic must not depend on Vault or JFrog; hand a predicate to cli.py instead")
                    for path in evidence_logic()]
     independent.append((ROOT / "verification.py", "A verifier needs public keys only, never Vault or JFrog"))
+    independent.append((ROOT / "display.py", "Showing evidence needs the predicate only, never Vault or JFrog"))
     for path, why in independent:
         where = path.relative_to(ROOT)
         try:
