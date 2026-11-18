@@ -18,6 +18,7 @@ demo.yml  build ──► evidence.yml ─────────────�
                                                   envelopes (artifact) ─────────────►
 ```
 
+- Callers call `evidence.yml` once per evidence type, from a matrix. Each type gets its own collect and sign jobs, its own log and summary, and installs only the scanner it calls; a type that fails stops no other. Its envelope is the artifact `evidence-envelopes-<type>`, and `verify` downloads them all with the pattern `evidence-envelopes-*`.
 - The collect job cannot request an OIDC token, so nothing a scanner runs can log in to Vault.
 - Vault trusts only `evidence.yml` on the allowed branches, on a self-hosted runner. Each key family has its own role and may sign with its own key only.
 - `verify` refuses a key from the wrong family, so a squad's self-declared `custom` evidence can never pass for a scan.
@@ -66,12 +67,12 @@ evidence/
   core.py, schema.py             shared helpers, JSON Schema subset validator
   evidence_sdk.py                helpers for collectors
   collectors/<type>/<version>/   collect.py, schema.json, examples/
-scripts/install-scanners.sh      TruffleHog and Grype, pinned by version and SHA-256
+scripts/install-scanners.sh      TruffleHog and Grype, pinned by version and SHA-256, or only the one named
 scripts/show-envelopes.py        prints what envelopes say: key id, subject, predicate
 samples/hello-{maven,python,node} Hello World web services with unit tests, as squads would write them
 trusted-keys/                    public keys from Transit, one per key version
 demo/predicate.json              what the demo declares through the custom type
-tests/                           77 tests against stand-in services, recorded scanner output and recorded JUnit XML
+tests/                           83 tests against stand-in services, recorded scanner output and recorded JUnit XML
 action.yml, Dockerfile           the one-job and container forms of the kit
 ```
 
@@ -105,7 +106,7 @@ Run the `demo` workflow from the Actions tab, or `gh workflow run demo.yml --ref
 | `peer-approval` | `evd-approval-lab` | `fail` unless the commit came from an approved pull request |
 | `custom` | `evd-self-lab` | no result: the squad declared it, nobody verified it |
 
-`fail` is recorded and signed; it fails the run only with `enforce`. The envelopes are in the run's `evidence-envelopes` artifact.
+`fail` is recorded and signed; it fails the run only with `enforce`. Each type's envelope is in the run's `evidence-envelopes-<type>` artifact.
 
 The sample squads run on their own: `hello-maven`, `hello-python` and `hello-node` start on a push that changes their sample or their workflow, and from the Actions tab once they are on `main`. Each produces four envelopes about its deployable:
 
@@ -116,17 +117,36 @@ The sample squads run on their own: `hello-maven`, `hello-python` and `hello-nod
 | `test-results` | `evd-build-lab` | `pass`: 4 Surefire tests, 3 pytest tests, 3 Node tests |
 | `provenance` | `evd-build-lab` | no result: SLSA provenance naming the workflow, commit and run |
 
-To check envelopes yourself:
+To check envelopes yourself (`verify` reads the folder `gh` makes for each artifact):
 
 ```
-gh run download <run id> -n evidence-envelopes -D /tmp/envelopes
+gh run download <run id> -p 'evidence-envelopes-*' -D /tmp/envelopes
 python3 evidence/cli.py verify --envelopes /tmp/envelopes --keys trusted-keys
-python3 scripts/show-envelopes.py /tmp/envelopes/*.dsse.json
+python3 scripts/show-envelopes.py /tmp/envelopes/*/*.dsse.json
 ```
+
+### What a sign job shows
+
+The log of the `🔏 Sign with Vault Transit` step follows each call to Vault as it happens. The tokens are masked and never printed; their claims are shown, so a refused login can be read against what the role binds:
+
+```
+🏦 Vault https://vault.adelisle.com: login at auth/github-actions, Transit at transit-evidence, RSA PKCS#1 v1.5 with SHA-256
+📜 In-toto statement about lab-artifacts/hello-maven/<run>/hello-maven.jar, SHA-256 <sha256>: https://…/sca/v2, <n> bytes
+🪪 Identity token from GitHub's OIDC endpoint, valid until <time> UTC. Vault checks these claims against role evidence-scan-lab:
+     aud                 https://vault.adelisle.com
+     job_workflow_ref    Depthmark-Lab/test-evidences/.github/workflows/evidence.yml@refs/heads/feature/build-evidence
+     runner_environment  self-hosted
+     …
+🔐 Vault login with role evidence-scan-lab: batch token, valid 10m, policies evidence-scan-lab-transit-sign. Request <request id>, <n> ms. The token is masked, never printed
+✍️ Transit sign with evd-scan-lab: RSA PKCS#1 v1.5 over the SHA-256 of <n> bytes, the statement's DSSE encoding. Their SHA-256: <sha256>
+✅ Vault signed with evd-scan-lab version 1, key id evd-scan-lab-v1: a 256-byte signature. Request <request id>, <n> ms. The private key never left Vault
+```
+
+When Vault refuses, a `⛔` line gives its answer, such as `claim "job_workflow_ref" does not match any associated bound claim values`. The job's summary repeats it in the section "🔐 How Vault Transit signed": a row per login with the claims and the token Vault issued, and a row per signature with the key version, the SHA-256 of the bytes signed and Vault's request id, which Vault's audit log also records.
 
 ## What was tested
 
-- The 77 tests: the kit against stand-in GitHub, Vault, JFrog and SonarQube, scanners replaying recorded output, JUnit XML that Surefire, pytest and Node wrote for the samples (passing, failing, erroring, skipped and flaky), both stores, the collect and sign split, verification against openssl, the step summaries (one line of facts per type, and Markdown escaped where squads wrote the text), and `evidence.yml`: its shape, and its subject and parameter steps run with bash.
+- The 83 tests: the kit against stand-in GitHub, Vault, JFrog and SonarQube, scanners replaying recorded output, JUnit XML that Surefire, pytest and Node wrote for the samples (passing, failing, erroring, skipped and flaky), both stores, the collect and sign split, verification against openssl, the step summaries (one line of facts per type, and Markdown escaped where squads wrote the text), the sign log's steps with Vault and a refused login, and `evidence.yml`: its shape, one type per call, and its subject, scanner and parameter steps run with bash.
 - In the runner image `ghcr.io/actions/actions-runner:2.338.2`, capped at 512Mi and 1 CPU: `install-scanners.sh`, and `collect` with the real TruffleHog and Grype on the sample app. With the work directory on a volume, as on the runners, the cold `sca` run wrote 3.3 GB there and 196 KB to the container itself. At 384Mi it was OOM-killed.
 - Against a local `vault server -dev`: `bootstrap.sh` and `apply.sh` with the new roles, JWT login with GitHub-shaped tokens, signing with PKCS#1 v1.5 and PSS, `verify`, openssl, and every refusal: another workflow or branch, a GitHub-hosted runner, the wrong audience, a scan token using the self key, exporting a key.
 - The samples end to end, on 2026-11-17: each built and tested with its real toolchain, then `collect` in the runner image with the real TruffleHog and Grype on the jar and the bundles, then `sign` through a local Vault set up by `bootstrap.sh` and `apply.sh` with the build family, then `verify` and openssl: 12 envelopes, each with its family's key. The squad's own workflow was refused a token, and a jar changed by one byte matched none of its evidence. The Maven jar is reproducible: the same SHA-256 from two different builds, and from the runner.

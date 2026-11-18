@@ -35,7 +35,7 @@ import schema as schemas  # noqa: E402
 import signing  # noqa: E402
 import verification  # noqa: E402
 from core import EvidenceError, load_json, predicate_type  # noqa: E402
-from display import announce, report  # noqa: E402
+from display import announce, report, transit  # noqa: E402
 from version import __version__  # noqa: E402
 
 COLLECTORS = collection.COLLECTORS
@@ -172,6 +172,7 @@ def cmd_run(args):
 
     vault = signing.Vault(settings)
     store, status, done_as = make_store(settings, args, vault)
+    print(vault.describe(), flush=True)
 
     def from_vault(entry):
         return lambda _name, spec: vault.read_secret(entry["family"], spec["path"], spec["field"])
@@ -180,11 +181,17 @@ def cmd_run(args):
         rows = process(types, catalog, collector(settings, params, from_vault, workdir), status, store)
     report(rows, signed_heading(status), status, done_as, "Signed by",
            subject=(args.subject_repo_path, args.subject_sha256))
+    transit(vault.trail, vault.describe(), statement_names(settings, catalog, types))
     return outcome(rows, args.enforce)
 
 
 def signed_heading(status):
     return "🔏 Evidence signed with Vault Transit" + (", attached in JFrog" if status == "attached" else "")
+
+
+def statement_names(settings, catalog, types):
+    """The (type, version) each requested type's statements carry, by predicate type: names for the signing trail."""
+    return {predicate_type(settings, t, catalog[t], catalog[t]["current"]): (t, catalog[t]["current"]) for t in types}
 
 
 def cmd_collect(args):
@@ -239,9 +246,11 @@ def cmd_sign(args):
 
     vault = signing.Vault(settings)
     store, status, done_as = make_store(settings, args, vault)
+    print(vault.describe(), flush=True)
     rows = process(types, catalog, from_file, status, store)
     report(rows, signed_heading(status), status, done_as, "Signed by",
            subject=(args.subject_repo_path, args.subject_sha256))
+    transit(vault.trail, vault.describe(), statement_names(settings, catalog, types))
     return outcome(rows, args.enforce)
 
 
@@ -250,7 +259,8 @@ def cmd_verify(args):
     if args.subject_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.subject_sha256):
         raise EvidenceError("subject-sha256 must be 64 lowercase hex characters")
     keys = verification.load_trusted_keys(args.keys)
-    files = sorted(Path(args.envelopes).glob("*.dsse.json"))
+    # Subfolders too: downloading a run's artifacts gives a folder per artifact, one per type.
+    files = sorted(Path(args.envelopes).rglob("*.dsse.json"))
     if not files:
         raise EvidenceError(f"no envelopes (*.dsse.json) in {args.envelopes}")
     expected = parse_types(args.types, catalog) if args.types else []
@@ -470,7 +480,7 @@ def main(argv=None):
     sign.set_defaults(handler=cmd_sign)
 
     verify = commands.add_parser("verify", help="check signed envelopes with trusted public keys only")
-    verify.add_argument("--envelopes", required=True, help="directory holding <type>.dsse.json files")
+    verify.add_argument("--envelopes", required=True, help="directory holding <type>.dsse.json files, in subdirectories or not")
     verify.add_argument("--keys", required=True, help="directory holding trusted <key id>.pub.pem files")
     verify.add_argument("--subject-sha256", default="", help="SHA-256 every envelope's subject must carry")
     verify.add_argument("--types", default="", help="comma-separated evidence type ids that must all be present")

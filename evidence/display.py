@@ -1,8 +1,9 @@
 """How evidence reads in a job's log and step summary: an icon, the result and a line of facts per type.
 
 Shows what collect, sign and verify decided, and decides nothing itself. Reads
-predicates only, never Vault or JFrog. Squads write some of what predicates hold
-(test names, claims, paths), so every value goes into Markdown escaped.
+predicates, and the signing trail cli.py hands it as plain data: it never calls
+Vault or JFrog. Squads write some of what predicates hold (test names, claims,
+paths), so every value goes into Markdown escaped.
 """
 from __future__ import annotations
 
@@ -179,5 +180,51 @@ def folded(row):
               for s in statement.get("subject", [])]
     lines += ["", fence + "json", body, fence]
     if cut:
-        lines += ["", f"_Cut at {STATEMENT_LIMIT:,} characters: the envelope in `evidence-envelopes` holds it all._"]
+        lines += ["", f"_Cut at {STATEMENT_LIMIT:,} characters: its envelope holds it all._"]
     return "\n".join(lines + ["", "</details>", ""])
+
+
+def transit(trail, vault, names):
+    """Add how Vault Transit signed to the step summary: each login and each signature, in order.
+
+    trail is the Vault's, as plain data: a dict per login (role, claims, token, request) and per
+    signature (key, version, bytes signed, request), with an error where Vault refused. vault is
+    its one-line description. names maps a predicate type to its (type, version).
+    """
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary or not trail:
+        return
+    lines = ["", "### 🔐 How Vault Transit signed", "", text(vault), ""]
+    logins = [step for step in trail if step["step"] == "login"]
+    if logins:
+        lines += ["| | Login | The identity token's claims, which Vault checks | Vault's token | Request |",
+                  "|:-:|---|---|---|---|"]
+        for step in logins:
+            claims = "<br>".join(f"{code(name)} {code(value)}" for name, value in step["claims"].items())
+            claims = claims or "not a JWT, so not shown"
+            role = f"role {code(step['role'])}"
+            if step.get("error"):
+                lines.append(f"| {FAILED} | {role} | {claims} | {text(step['error'])} | |")
+            else:
+                token = (f"{text(step['tokenType'])} token, valid {text(step['valid'])}, policies "
+                         f"{', '.join(code(policy) for policy in step['policies']) or 'none'}")
+                lines.append(f"| {DONE} | {role} | {claims} | {token} | {code(step['request'])} · {step['ms']} ms |")
+        lines.append("")
+    signatures = [step for step in trail if step["step"] == "sign"]
+    if signatures:
+        lines += ["| | Evidence | Key | What Vault signed | Vault's answer |", "|:-:|---|---|---|---|"]
+        for step in signatures:
+            type_id, version = names.get(step["about"], (step["about"] or "a statement", ""))
+            evidence = f"{code(type_id)} {text(version)}".strip()
+            signed = f"{step['bytes']:,} bytes, SHA-256 {code(step['sha256'][:16] + '…')}"
+            if step.get("error"):
+                lines.append(f"| {FAILED} | {evidence} | {code(step['key'])}, {text(step['algorithm'])} | {signed}"
+                             f" | {text(step['error'])} |")
+            else:
+                key = f"{code(step['key'])} version {text(step['version'])}, {text(step['algorithm'])}"
+                answer = f"key id {code(step['keyId'])} · request {code(step['request'])} · {step['ms']} ms"
+                lines.append(f"| {DONE} | {evidence} | {key} | {signed} | {answer} |")
+        lines.append("")
+    lines += ["_The tokens are masked and never printed. Vault's audit log records each request by its id._", ""]
+    with open(summary, "a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")

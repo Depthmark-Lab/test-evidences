@@ -30,6 +30,21 @@ def openssl(*args, data=None):
     return subprocess.run(["openssl", *args], input=data, capture_output=True)
 
 
+def jwt(claims):
+    """A token shaped like GitHub's OIDC token: real claims, a signature nobody checks."""
+    def part(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+    return f"{part({'alg': 'RS256', 'typ': 'JWT'})}.{part(claims)}.c2lnbmF0dXJl"
+
+
+def github_claims(audience):
+    """What GitHub puts in the token of a job of evidence.yml on main, on a self-hosted runner."""
+    return {"iss": "https://token.actions.githubusercontent.com", "aud": audience, "sub": f"repo:{REPO}:ref:refs/heads/main",
+            "repository": REPO, "ref": "refs/heads/main", "sha": SHA, "run_id": "4242", "run_attempt": "1",
+            "job_workflow_ref": f"{REPO}/.github/workflows/evidence.yml@refs/heads/main",
+            "runner_environment": "self-hosted", "iat": 1_800_000_000, "exp": 1_800_000_300}
+
+
 _FAKE_SCANNER = """#!{python}
 import json, os, sys
 with open({log!r}, "a") as handle:
@@ -70,6 +85,7 @@ class Services:
         self.gate_status = "OK"
         self.has_analysis = True
         self.tamper_statement = False
+        self.refuse_logins = False
 
         # What the services saw
         self.vault_logins = []      # (role, jwt)
@@ -147,7 +163,7 @@ class _Handler(BaseHTTPRequestHandler):
         if url.path == "/oidc":
             if self.headers.get("Authorization") != "Bearer runner-token":
                 return self.reply(401, {"message": "bad runner token"})
-            return self.reply(200, {"value": "jwt-for-" + query["audience"][0]})
+            return self.reply(200, {"value": jwt(github_claims(query["audience"][0]))})
 
         if url.path == "/v1/kv/data/evidence/sonarqube":
             if self.headers.get("X-Vault-Token") != "hvs.evidence-scan-prod":
@@ -195,7 +211,12 @@ class _Handler(BaseHTTPRequestHandler):
             if self.headers.get("X-Vault-Namespace") != "platform":
                 return self.reply(400, {"errors": ["missing namespace"]})
             s.vault_logins.append((body["role"], body["jwt"]))
-            return self.reply(200, {"auth": {"client_token": "hvs." + body["role"]}})
+            if s.refuse_logins:
+                return self.reply(400, {"errors": [
+                    'error validating claims: claim "job_workflow_ref" does not match any associated bound claim values']})
+            return self.reply(200, {"request_id": f"login-{len(s.vault_logins)}", "auth": {
+                "client_token": "hvs." + body["role"], "token_type": "batch", "lease_duration": 600,
+                "token_policies": [body["role"] + "-transit-sign"]}})
 
         if url.path.startswith("/v1/transit-evidence/sign/"):
             key_name = url.path.rsplit("/", 1)[1]
@@ -211,7 +232,8 @@ class _Handler(BaseHTTPRequestHandler):
                     return self.reply(400, {"errors": ["pss needs salt_length=hash"]})
                 args += ["-sigopt", "rsa_padding_mode:pss", "-sigopt", "rsa_pss_saltlen:32"]
             signature = openssl(*args, data=base64.b64decode(body["input"])).stdout
-            return self.reply(200, {"data": {"signature": "vault:v3:" + base64.b64encode(signature).decode()}})
+            return self.reply(200, {"request_id": f"sign-{len(s.sign_calls)}", "data": {
+                "signature": "vault:v3:" + base64.b64encode(signature).decode(), "key_version": 3}})
 
         if url.path == "/access/api/v1/oidc/token":
             if body.get("provider_name") != "github-evidence" or not body.get("grant_type", "").endswith("token-exchange"):

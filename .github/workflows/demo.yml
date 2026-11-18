@@ -1,7 +1,8 @@
 # Demo of the whole chain on the Talos runners, as a squad and a consumer would see it:
 #   build     builds a sample application with leaked secrets and vulnerable
 #             dependencies, and packages it: the artifact the evidence is about
-#   evidence  collects evidence about it, then signs it with Vault Transit
+#   evidence  collects evidence about it, then signs it with Vault Transit, in one
+#             call of evidence.yml per type
 #   verify    checks every envelope with the trusted public keys only
 # Each job adds what it did to the run's summary page.
 name: demo
@@ -30,11 +31,23 @@ jobs:
       contents: read
     outputs:
       sha256: ${{ steps.package.outputs.sha256 }}
+      types: ${{ steps.types.outputs.json }}
     steps:
       - name: 📥 Check out the sample's generator
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # A matrix needs a JSON list, and expressions cannot split the comma-separated input.
+      - name: 📋 List the types, one evidence call each
+        id: types
+        env:
+          EVD_IN_TYPES: ${{ inputs.types }}
+        run: |
+          json=$(python3 -c 'import json, os; print(json.dumps(list(dict.fromkeys(
+              t.strip() for t in os.environ["EVD_IN_TYPES"].split(",") if t.strip()))))')
+          echo "json=$json" >>"$GITHUB_OUTPUT"
+          echo "📋 One call of evidence.yml per type: $json"
 
       - name: 🔨 Build the sample application
         run: |
@@ -75,18 +88,24 @@ jobs:
 
   evidence:
     needs: build
+    # One call per evidence type: each gets its own runners, log and summary,
+    # and a type that fails stops no other.
+    strategy:
+      fail-fast: false
+      matrix:
+        type: ${{ fromJSON(needs.build.outputs.types) }}
     uses: ./.github/workflows/evidence.yml
     permissions:
       contents: read
       pull-requests: read
       id-token: write
     with:
-      types: ${{ inputs.types }}
+      type: ${{ matrix.type }}
       subject-repo-path: lab-artifacts/sample-app/${{ github.run_number }}/sample-app.tar.gz
       subject-sha256: ${{ needs.build.outputs.sha256 }}
       source-artifact: sample-app-source
-      # predicate-file only when custom is requested: a parameter no requested type uses is refused.
-      params: ${{ contains(format(',{0},', inputs.types), ',custom,') && 'predicate-file=predicate.json' || '' }}
+      # A parameter the type does not use is refused, so only custom gets predicate-file.
+      params: ${{ matrix.type == 'custom' && 'predicate-file=predicate.json' || '' }}
       enforce: ${{ inputs.enforce }}
 
   verify:
@@ -102,10 +121,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 📥 Download the signed envelopes
+      - name: 📥 Download the signed envelopes, one artifact per type
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: evidence-envelopes
+          pattern: evidence-envelopes-*
+          merge-multiple: true
           path: ${{ runner.temp }}/envelopes
 
       # Prints each verified statement in a log group, and adds them to the summary, folded.
