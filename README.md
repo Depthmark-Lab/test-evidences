@@ -58,6 +58,7 @@ hello-<lang>.yml  build ────────────► evidence.yml ─
 
 ```
 .github/workflows/evidence.yml   reusable workflow, the trust boundary: collect, then sign
+.github/workflows/verify.yml     reusable workflow, a consumer's check of the envelopes, for callers in other repositories
 .github/workflows/demo.yml       builds a sample app, runs evidence.yml on it, verifies the result
 .github/workflows/hello-*.yml    a squad's own CI for each sample service: build, evidence.yml, verify
 .github/workflows/repository-snapshot.yml   reusable: the one workflow with a token to read a repository's controls
@@ -146,9 +147,11 @@ The log of the `🔏 Sign with Vault Transit` step follows each call to Vault as
 🏦 Vault https://vault.adelisle.com: login at auth/github-actions, Transit at transit-evidence, RSA PKCS#1 v1.5 with SHA-256
 📜 In-toto statement about lab-artifacts/hello-maven/<run>/hello-maven.jar, SHA-256 <sha256>: https://…/sca/v2, <n> bytes
 🪪 Identity token from GitHub's OIDC endpoint, valid until <time> UTC. Vault checks these claims against role evidence-scan-lab:
-     aud                 https://vault.adelisle.com
-     job_workflow_ref    Depthmark-Lab/test-evidences/.github/workflows/evidence.yml@refs/heads/feature/build-evidence
-     runner_environment  self-hosted
+     aud                  https://vault.adelisle.com
+     job_workflow_ref     Depthmark-Lab/test-evidences/.github/workflows/evidence.yml@refs/heads/feature/build-evidence
+     runner_environment   self-hosted
+     repository           Depthmark-Lab/test-evidences
+     repository_owner_id  71595780
      …
 🔐 Vault login with role evidence-scan-lab: batch token, valid 10m, policies evidence-scan-lab-transit-sign. Request <request id>, <n> ms. The token is masked, never printed
 ✍️ Transit sign with evd-scan-lab: RSA PKCS#1 v1.5 over the SHA-256 of <n> bytes, the statement's DSSE encoding. Their SHA-256: <sha256>
@@ -176,4 +179,4 @@ On the Talos runners: `ci` passed on `gha-runner-scale-set-lab` in `rg-talos-lab
 - Store `file` instead of JFrog, and `verify` instead of JFrog's check. The JFrog store is unchanged and still tested.
 - Transit generates the keys itself instead of using Azure Key Vault managed keys, which need Vault Enterprise.
 - Vault trusts branch refs, not `v*` tags: there is no release workflow here yet, so release-please, `RELEASING.md` and the version tests were left out.
-- The kit is checked out from this repository at the caller's commit instead of being pinned as an action, so only workflows in this repository can call `evidence.yml`.
+- The kit is checked out at the called workflow's own commit (`job.workflow_repository` at `job.workflow_sha`) instead of being pinned as an action, so a branch, a tag or a commit of `evidence.yml` always runs its own code, and there is no version line for a release to rewrite. A caller in another repository needs this repository to be public: its token can read nothing else.
