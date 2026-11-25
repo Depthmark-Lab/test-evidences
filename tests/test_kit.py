@@ -600,9 +600,10 @@ class FileStoreTest(FileStore):
             f" {len(base64.b64decode(envelope['payload'])):,} bytes",
             "🪪 Identity token from GitHub's OIDC endpoint, valid until 08:05:00 UTC."
             " Vault checks these claims against role evidence-self-prod:",
-            "     aud                 https://vault.acme-bank.example",
-            f"     job_workflow_ref    {workflow}",
-            "     runner_environment  self-hosted",
+            "     aud                  https://vault.acme-bank.example",
+            f"     job_workflow_ref     {workflow}",
+            "     runner_environment   self-hosted",
+            "     repository_owner_id  71595780",
             "🔐 Vault login with role evidence-self-prod: batch token, valid 10m, policies evidence-self-prod-transit-sign."
             " Request login-2,",
             f"✍️ Transit sign with evd-self-prod: RSA PKCS#1 v1.5 over the SHA-256 of {len(signed):,} bytes,"
@@ -626,7 +627,7 @@ class FileStoreTest(FileStore):
         self.assertEqual(code, 1)
         refusal = "does not match any associated bound claim values"
         # The log shows the claims before the login, so the refusal can be read against them.
-        self.assertLess(output.index(f"     job_workflow_ref    {REPO}/.github/workflows/evidence.yml@refs/heads/main"),
+        self.assertLess(output.index(f"     job_workflow_ref     {REPO}/.github/workflows/evidence.yml@refs/heads/main"),
                         output.index(f"⛔ POST {self.services.url}/v1/auth/github-actions/login returned 400"))
         self.assertIn(refusal, output)
         self.assertRegex(summary, r"\| ❌ \| role `evidence-approval-prod` \| `aud` .*\| .*does not match any associated")
@@ -1172,23 +1173,23 @@ class WorkflowTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.runner_temp, ignore_errors=True)
 
     @classmethod
-    def jobs(cls):
-        """Each job's lines in evidence.yml, by job id. Enough YAML for these checks, without a parser."""
-        text = cls.WORKFLOW.read_text().split("\njobs:\n", 1)[1]
+    def jobs(cls, workflow=None):
+        """Each job's lines in evidence.yml, or another workflow, by job id. Enough YAML for these checks."""
+        text = (workflow or cls.WORKFLOW).read_text().split("\njobs:\n", 1)[1]
         return {match[1]: match[2] for match in re.finditer(r"(?m)^  ([a-z-]+):\n((?:(?:    .*)?\n)*)", text)}
 
     @classmethod
-    def step(cls, job, name):
+    def step(cls, job, name, workflow=None):
         """A step's lines, from its '- name:' to the next step."""
-        return cls.jobs()[job].split(f"      - name: {name}\n", 1)[1].split("\n      - ", 1)[0]
+        return cls.jobs(workflow)[job].split(f"      - name: {name}\n", 1)[1].split("\n      - ", 1)[0]
 
-    def run_step(self, job, name, **env):
+    def run_step(self, job, name, workflow=None, **env):
         """Run a step's script with bash as the runner would, python3 replaced by a recorder of its arguments.
 
         Returns (exit code, output, the step's outputs, python3's arguments or None).
         """
         script = []
-        for line in self.step(job, name).split("        run: |\n", 1)[1].splitlines():
+        for line in self.step(job, name, workflow).split("        run: |\n", 1)[1].splitlines():
             if line.strip() and not line.startswith(" " * 10):
                 break                       # a comment that heads the next step
             script.append(line[10:])
@@ -1330,6 +1331,50 @@ class WorkflowTest(unittest.TestCase):
             # GitHub checks a called workflow's permissions before any job runs: attest's included.
             self.assertIn("id-token: write\n      attestations: write", call, name)
             self.assertIn("pattern: evidence-envelopes-*\n          merge-multiple: true", workflow, name)
+
+    def test_the_kit_is_the_commit_of_the_called_workflow_not_the_callers(self):
+        """From another repository, github.workflow_sha is the caller's commit: the kit would not be there."""
+        verify = self.WORKFLOWS / "verify.yml"
+        checkouts = [(self.WORKFLOW, "collect", "📥 Check out the kit"), (self.WORKFLOW, "sign", "📥 Check out the kit"),
+                     (verify, "verify", "📥 Check out the kit and the trusted public keys")]
+        for workflow, job, name in checkouts:
+            checkout = self.step(job, name, workflow)
+            self.assertIn("repository: ${{ job.workflow_repository }}\n          ref: ${{ job.workflow_sha }}\n"
+                          "          path: .evidence-kit\n          persist-credentials: false", checkout, job)
+        for workflow in (self.WORKFLOW, verify):
+            self.assertNotIn("ref: ${{ github.workflow_sha }}", workflow.read_text(), workflow.name)
+
+    def test_verify_checks_the_artifact_it_hashed_itself_with_the_kits_keys(self):
+        jobs = self.jobs(self.WORKFLOWS / "verify.yml")
+        self.assertEqual(sorted(jobs), ["verify"])
+        self.assertNotIn("id-token", jobs["verify"])
+        subject = self.runner_temp / "subject"
+        subject.mkdir()
+        (subject / "hello-python.tar.gz").write_bytes(b"bundle")
+        sha256 = hashlib.sha256(b"bundle").hexdigest()
+        step = dict(workflow=self.WORKFLOWS / "verify.yml", EVD_IN_SUBJECT_ARTIFACT="hello-python-bundle",
+                    EVD_IN_TYPES="provenance,provenance-attestation")
+        code, output, _, args = self.run_step("verify", "🛡️ Verify the artifact's evidence with the trusted public keys",
+                                              **step)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(args, [".evidence-kit/evidence/cli.py", "verify", "--envelopes", f"{self.runner_temp}/envelopes",
+                                "--keys", ".evidence-kit/trusted-keys", "--subject-sha256", sha256,
+                                "--types", "provenance,provenance-attestation"])
+        (subject / "notes.txt").write_text("and something else")
+        code, output, _, args = self.run_step("verify", "🛡️ Verify the artifact's evidence with the trusted public keys",
+                                              **step)
+        self.assertEqual((code, args), (1, None), output)
+        self.assertIn("must hold exactly one file, the artifact, not 2", output)
+
+    def test_no_workflow_starts_on_an_event_a_fork_can_cause(self):
+        """Every job here runs on the Talos runners, inside the homelab: in a public repository, a fork's pull
+        request must never start one. Only people who can push start these workflows."""
+        allowed = {"push", "workflow_dispatch", "workflow_call", "schedule"}
+        for workflow in sorted(self.WORKFLOWS.glob("*.yml")):
+            triggers = workflow.read_text().split("\non:\n", 1)[1].split("\n\n", 1)[0]
+            events = set(re.findall(r"(?m)^  ([a-z_]+):", triggers))
+            self.assertTrue(events, workflow.name)
+            self.assertLessEqual(events, allowed, workflow.name)
 
     def test_each_type_installs_only_the_scanner_it_calls(self):
         installer = self.runner_temp / ".evidence-kit" / "scripts" / "install-scanners.sh"

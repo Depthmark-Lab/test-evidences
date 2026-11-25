@@ -31,9 +31,12 @@
 # reads the build's JUnit XML from it. The caller's build produces both; this
 # workflow never runs the caller's code.
 #
-# Lab only: the kit is checked out from this repository at the caller's commit,
-# so callers must live in this repository. A caller elsewhere fails at that
-# checkout. The production kit pins its action by version instead.
+# The kit is checked out at this file's own commit (job.workflow_repository at
+# job.workflow_sha), whichever repository calls it and at whichever ref: the
+# code that runs is the code of the job_workflow_ref Vault trusts. A caller in
+# another repository needs this repository to be public, since the caller's
+# token can read nothing else, and then verifies with verify.yml at the same
+# ref. The production kit pins its action by version instead.
 name: evidence
 
 on:
@@ -153,11 +156,12 @@ jobs:
       subject-sha256: ${{ steps.subject.outputs.sha256 }}
       predicates-id: ${{ steps.hand-off.outputs.artifact-id }}
     steps:
+      # This file's own commit, not the caller's: github.workflow_sha belongs to the caller.
       - name: 📥 Check out the kit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: Depthmark-Lab/test-evidences
-          ref: ${{ github.workflow_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .evidence-kit
           persist-credentials: false
 
@@ -344,11 +348,12 @@ jobs:
       contents: read
       id-token: write
     steps:
+      # This file's own commit, not the caller's: github.workflow_sha belongs to the caller.
       - name: 📥 Check out the kit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: Depthmark-Lab/test-evidences
-          ref: ${{ github.workflow_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .evidence-kit
           persist-credentials: false
 

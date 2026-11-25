@@ -1,0 +1,86 @@
+# The consumer's check, for callers of evidence.yml in other repositories.
+#
+# Verifies the signed envelopes of this run against the artifact they are about,
+# with the trusted public keys only, never asking Vault: it plays JFrog's part,
+# as the verify jobs of the hello-* workflows do. The kit and its trusted-keys/
+# come from this file's own commit (job.workflow_repository at job.workflow_sha),
+# so call it at the same ref as evidence.yml, after it, in the same run:
+#
+#   verify:
+#     needs: [build, evidence]
+#     if: ${{ !cancelled() && needs.build.result == 'success' }}
+#     uses: Depthmark-Lab/test-evidences/.github/workflows/verify.yml@<the ref of evidence.yml>
+#     with:
+#       subject-artifact: hello-world-binary
+#       types: provenance,provenance-attestation
+#
+# It hashes the artifact itself, and fails unless every type listed has an
+# envelope about that SHA-256, signed by a key its family may use.
+name: verify
+
+on:
+  workflow_call:
+    inputs:
+      subject-artifact:
+        description: Artifact of this run holding exactly one file, the artifact the evidence is about
+        required: true
+        type: string
+      types:
+        description: Comma-separated evidence type ids, each of which must have a verified envelope
+        required: true
+        type: string
+      runs-on:
+        description: Runner labels, as a JSON list
+        required: false
+        type: string
+        default: '["self-hosted", "talos", "lab"]'
+
+permissions: {}
+
+jobs:
+  verify:
+    name: 🛡️ Verify the evidence
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # This file's own commit, not the caller's: github.workflow_sha belongs to the caller.
+      - name: 📥 Check out the kit and the trusted public keys
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .evidence-kit
+          persist-credentials: false
+
+      - name: 📦 Download the artifact the evidence is about
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.subject-artifact }}
+          path: ${{ runner.temp }}/subject
+
+      - name: 📥 Download the signed envelopes, one artifact per type
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: evidence-envelopes-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/envelopes
+
+      # Prints each verified statement in a log group, and adds them to the summary, folded.
+      - name: 🛡️ Verify the artifact's evidence with the trusted public keys
+        env:
+          EVD_IN_SUBJECT_ARTIFACT: ${{ inputs.subject-artifact }}
+          EVD_IN_TYPES: ${{ inputs.types }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find "$RUNNER_TEMP/subject" -type f)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "::error::subject-artifact $EVD_IN_SUBJECT_ARTIFACT must hold exactly one file, the artifact, not ${#files[@]}"
+            exit 1
+          fi
+          sha256=$(sha256sum "${files[0]}" | cut -d' ' -f1)
+          echo "🔒 SHA-256 of the artifact, computed here: $sha256"
+          python3 .evidence-kit/evidence/cli.py verify --envelopes "$RUNNER_TEMP/envelopes" \
+            --keys .evidence-kit/trusted-keys --subject-sha256 "$sha256" --types "$EVD_IN_TYPES"
+          echo "::notice title=✅ Evidence verified::The signed statements about sha256 $sha256 hold with the trusted public keys"

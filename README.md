@@ -20,7 +20,7 @@ demo.yml  build ──► evidence.yml ─────────────�
 
 - Callers call `evidence.yml` once per evidence type, from a matrix. Each type gets its own collect and sign jobs, its own log and summary, and installs only the scanner it calls; a type that fails stops no other. Its envelope is the artifact `evidence-envelopes-<type>`, and `verify` downloads them all with the pattern `evidence-envelopes-*`.
 - The collect job cannot request an OIDC token, so nothing a scanner runs can log in to Vault. For `provenance-attestation` only, an `attest` job runs first: it holds a token for GitHub's Sigstore and runs GitHub's attest action, nothing else.
-- Vault trusts only `evidence.yml` on the allowed branches, on a self-hosted runner. Each key family has its own role and may sign with its own key only.
+- Vault trusts only `evidence.yml` on the allowed branches, on a self-hosted runner, called from a repository of Depthmark-Lab. Each key family has its own role and may sign with its own key only.
 - `verify` refuses a key from the wrong family, so a squad's self-declared `custom` evidence can never pass for a scan.
 
 ## Evidence about a squad's build
@@ -57,6 +57,7 @@ hello-<lang>.yml  build ────────────► evidence.yml ─
 
 ```
 .github/workflows/evidence.yml   reusable workflow, the trust boundary: collect, then sign
+.github/workflows/verify.yml     reusable workflow, a consumer's check of the envelopes, for callers in other repositories
 .github/workflows/demo.yml       builds a sample app, runs evidence.yml on it, verifies the result
 .github/workflows/hello-*.yml    a squad's own CI for each sample service: build, evidence.yml, verify
 .github/workflows/ci.yml         check and tests on every push
@@ -76,7 +77,7 @@ scripts/show-envelopes.py        prints what envelopes say: key id, subject, pre
 samples/hello-{maven,python,node} Hello World web services with unit tests, as squads would write them
 trusted-keys/                    public keys from Transit, one per key version
 demo/predicate.json              what the demo declares through the custom type
-tests/                           88 tests against stand-in services, recorded scanner output and recorded JUnit XML
+tests/                           91 tests against stand-in services, recorded scanner output and recorded JUnit XML
 action.yml, Dockerfile           the one-job and container forms of the kit
 ```
 
@@ -140,9 +141,11 @@ The log of the `🔏 Sign with Vault Transit` step follows each call to Vault as
 🏦 Vault https://vault.adelisle.com: login at auth/github-actions, Transit at transit-evidence, RSA PKCS#1 v1.5 with SHA-256
 📜 In-toto statement about lab-artifacts/hello-maven/<run>/hello-maven.jar, SHA-256 <sha256>: https://…/sca/v2, <n> bytes
 🪪 Identity token from GitHub's OIDC endpoint, valid until <time> UTC. Vault checks these claims against role evidence-scan-lab:
-     aud                 https://vault.adelisle.com
-     job_workflow_ref    Depthmark-Lab/test-evidences/.github/workflows/evidence.yml@refs/heads/feature/build-evidence
-     runner_environment  self-hosted
+     aud                  https://vault.adelisle.com
+     job_workflow_ref     Depthmark-Lab/test-evidences/.github/workflows/evidence.yml@refs/heads/feature/build-evidence
+     runner_environment   self-hosted
+     repository           Depthmark-Lab/test-evidences
+     repository_owner_id  71595780
      …
 🔐 Vault login with role evidence-scan-lab: batch token, valid 10m, policies evidence-scan-lab-transit-sign. Request <request id>, <n> ms. The token is masked, never printed
 ✍️ Transit sign with evd-scan-lab: RSA PKCS#1 v1.5 over the SHA-256 of <n> bytes, the statement's DSSE encoding. Their SHA-256: <sha256>
@@ -153,7 +156,7 @@ When Vault refuses, a `⛔` line gives its answer, such as `claim "job_workflow_
 
 ## What was tested
 
-- The 88 tests: the kit against stand-in GitHub, Vault, JFrog and SonarQube, scanners and gh replaying recorded output, JUnit XML that Surefire, pytest and Node wrote for the samples (passing, failing, erroring, skipped and flaky), both stores, the collect and sign split, verification against openssl, the step summaries (one line of facts per type, and Markdown escaped where squads wrote the text), the sign log's steps with Vault and a refused login, GitHub's attestation verified, absent or not verifying, and `evidence.yml`: its shape, one type per call, the attest job, and its subject, scanner and parameter steps run with bash.
+- The 91 tests: the kit against stand-in GitHub, Vault, JFrog and SonarQube, scanners and gh replaying recorded output, JUnit XML that Surefire, pytest and Node wrote for the samples (passing, failing, erroring, skipped and flaky), both stores, the collect and sign split, verification against openssl, the step summaries (one line of facts per type, and Markdown escaped where squads wrote the text), the sign log's steps with Vault and a refused login, GitHub's attestation verified, absent or not verifying, and `evidence.yml`: its shape, one type per call, the attest job, the kit at the called workflow's own commit, and its subject, scanner and parameter steps run with bash; `verify.yml`'s check run with bash; and no workflow a fork's pull request could start.
 - `provenance-attestation` with the real gh 2.102.0, in the runner image through `cli.py collect`, on 2026-11-18: `pass` on GitHub CLI's own release archive, whose attestation GitHub keeps publicly, and `fail` on the hello-maven jar of run 44301355733, since this repository holds none. The examples of its schema are those two predicates. GitHub's attest action itself has not run: it cannot on this repository.
 - In the runner image `ghcr.io/actions/actions-runner:2.338.2`, capped at 512Mi and 1 CPU: `install-scanners.sh`, and `collect` with the real TruffleHog and Grype on the sample app. With the work directory on a volume, as on the runners, the cold `sca` run wrote 3.3 GB there and 196 KB to the container itself. At 384Mi it was OOM-killed.
 - Against a local `vault server -dev`: `bootstrap.sh` and `apply.sh` with the new roles, JWT login with GitHub-shaped tokens, signing with PKCS#1 v1.5 and PSS, `verify`, openssl, and every refusal: another workflow or branch, a GitHub-hosted runner, the wrong audience, a scan token using the self key, exporting a key.
@@ -166,4 +169,4 @@ On the Talos runners: `ci` passed on `gha-runner-scale-set-lab` in `rg-talos-lab
 - Store `file` instead of JFrog, and `verify` instead of JFrog's check. The JFrog store is unchanged and still tested.
 - Transit generates the keys itself instead of using Azure Key Vault managed keys, which need Vault Enterprise.
 - Vault trusts branch refs, not `v*` tags: there is no release workflow here yet, so release-please, `RELEASING.md` and the version tests were left out.
-- The kit is checked out from this repository at the caller's commit instead of being pinned as an action, so only workflows in this repository can call `evidence.yml`.
+- The kit is checked out at the called workflow's own commit (`job.workflow_repository` at `job.workflow_sha`) instead of being pinned as an action, so a branch, a tag or a commit of `evidence.yml` always runs its own code, and there is no version line for a release to rewrite. A caller in another repository needs this repository to be public: its token can read nothing else.

@@ -40,7 +40,8 @@ def jwt(claims):
 def github_claims(audience):
     """What GitHub puts in the token of a job of evidence.yml on main, on a self-hosted runner."""
     return {"iss": "https://token.actions.githubusercontent.com", "aud": audience, "sub": f"repo:{REPO}:ref:refs/heads/main",
-            "repository": REPO, "ref": "refs/heads/main", "sha": SHA, "run_id": "4242", "run_attempt": "1",
+            "repository": REPO, "repository_owner_id": "71595780", "ref": "refs/heads/main", "sha": SHA,
+            "run_id": "4242", "run_attempt": "1",
             "job_workflow_ref": f"{REPO}/.github/workflows/evidence.yml@refs/heads/main",
             "runner_environment": "self-hosted", "iat": 1_800_000_000, "exp": 1_800_000_300}
 

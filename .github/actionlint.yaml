@@ -5,3 +5,13 @@ self-hosted-runner:
     - talos
     - lab
     - lab-k8s
+# job.workflow_repository and job.workflow_sha, the called workflow's own
+# repository and commit, are in GitHub's contexts reference, but actionlint
+# 1.7.12 does not know them yet.
+paths:
+  .github/workflows/evidence.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/verify.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

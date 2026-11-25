@@ -34,7 +34,8 @@ from core import PAYLOAD_TYPE, STATEMENT_TYPE, EvidenceError, http_json, mask, p
 
 ALGORITHMS = {"pkcs1v15": "RSA PKCS#1 v1.5", "pss": "RSA-PSS"}
 # The claims of the identity token that Vault's evidence roles bind or record, in the order the log shows them.
-CLAIMS = ("aud", "job_workflow_ref", "runner_environment", "repository", "ref", "sha", "run_id", "run_attempt")
+CLAIMS = ("aud", "job_workflow_ref", "runner_environment", "repository", "repository_owner_id", "ref", "sha",
+          "run_id", "run_attempt")
 
 
 def say(line):
