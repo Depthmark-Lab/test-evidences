@@ -311,22 +311,72 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(set(self.services.settings_auth), {"Bearer ghs_from_the_action"})
         self.assertEqual(self.services.revoked, [])
 
-    def test_the_workflow_asks_for_what_its_trust_policy_grants_and_nothing_else(self):
-        workflow = (REPO_ROOT / ".github" / "workflows" / "repository-controls.yml").read_text()
-        app = re.search(r"--sts-app (\S+)", workflow)[1]
-        identity = re.search(r"--sts-identity (\S+)", workflow)[1]
+    def test_only_repository_snapshot_yml_can_get_the_token(self):
+        workflows = REPO_ROOT / ".github" / "workflows"
+        reusable = (workflows / "repository-snapshot.yml").read_text()
+        app = re.search(r"--sts-app (\S+)", reusable)[1]
+        identity = re.search(r"--sts-identity (\S+)", reusable)[1]
+        # One identity for the pool, and it trusts the job of repository-snapshot.yml alone, whoever calls it.
+        self.assertEqual(sorted(p.name for p in (REPO_ROOT / ".github" / "sts" / app).glob("*.sts.yaml")),
+                         [f"{identity}.sts.yaml"])
         policy = (REPO_ROOT / ".github" / "sts" / app / f"{identity}.sts.yaml").read_text()
         pattern = re.search(r"job_workflow_ref: '([^']+)'", policy)[1]
-        self.assertRegex("Depthmark-Lab/test-evidences/.github/workflows/repository-controls.yml@refs/heads/main", pattern)
-        for other in ("Depthmark-Lab/test-evidences/.github/workflows/repository-controls.yml@refs/heads/feature/x",
+        self.assertRegex("Depthmark-Lab/test-evidences/.github/workflows/repository-snapshot.yml@refs/heads/main", pattern)
+        for other in ("Depthmark-Lab/test-evidences/.github/workflows/repository-snapshot.yml@refs/heads/feature/x",
+                      "Depthmark-Lab/test-evidences/.github/workflows/repository-controls.yml@refs/heads/main",
                       "Depthmark-Lab/test-evidences/.github/workflows/evidence.yml@refs/heads/main",
-                      "Depthmark-Lab/other/.github/workflows/repository-controls.yml@refs/heads/main"):
+                      "Depthmark-Lab/other/.github/workflows/repository-snapshot.yml@refs/heads/main"):
             self.assertNotRegex(other, pattern)
         self.assertIn("runner_environment: '^self-hosted$'", policy)
         granted = dict(re.findall(r"(?m)^  ([a-z_]+): (read|write)$", policy.split("\npermissions:\n", 1)[1]))
         self.assertEqual(granted, {"administration": "read", "environments": "read", "members": "read", "metadata": "read"})
-        self.assertIn("id-token: write", workflow)
+        self.assertIn("id-token: write", reusable)
+        # No other workflow names the pool or runs the script: they call repository-snapshot.yml.
+        for path in workflows.glob("*.yml"):
+            if path.name != "repository-snapshot.yml":
+                self.assertNotIn(app, path.read_text(), path.name)
+                self.assertNotIn("snapshot-repository.py", path.read_text(), path.name)
+        self.assertIn("uses: ./.github/workflows/repository-snapshot.yml", (workflows / "repository-controls.yml").read_text())
 
+    def test_the_declared_controls_are_read_from_inside_the_repository(self):
+        """repository-snapshot.yml's step, run with bash, python3 replaced by a recorder of its arguments."""
+        workflow = (REPO_ROOT / ".github" / "workflows" / "repository-snapshot.yml").read_text()
+        step = workflow.split("      - name: 📸 Snapshot the repository's controls\n", 1)[1].split("        run: |\n", 1)[1]
+        script = []
+        for line in step.splitlines():
+            if line.strip() and not line.startswith(" " * 10):
+                break                       # a comment that heads the next step
+            script.append(line[10:])
+        recorder = self.tmp / "bin" / "python3"
+        recorder.parent.mkdir()
+        recorder.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$RUNNER_TEMP/args"\n')
+        recorder.chmod(0o755)
+        (self.tmp / "declared" / "controls").mkdir(parents=True)
+        (self.tmp / "declared" / "controls" / "repository-controls.json").write_text("{}")
+
+        def run(check):
+            (self.tmp / "args").unlink(missing_ok=True)
+            done = subprocess.run(["bash", "-e", "-c", "\n".join(script)], capture_output=True, text=True, cwd=self.tmp,
+                                  env={"PATH": f"{recorder.parent}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(self.tmp),
+                                       "GITHUB_REPOSITORY": REPO, "EVD_IN_CHECK": check})
+            args = (self.tmp / "args").read_text().splitlines() if (self.tmp / "args").exists() else None
+            return done.returncode, done.stdout + done.stderr, args
+
+        code, output, args = run("controls/repository-controls.json")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(args[args.index("--check") + 1], "declared/controls/repository-controls.json")
+        self.assertEqual(args[args.index("--sts-identity") + 1], "repository-snapshot")
+
+        code, output, args = run("controls/not-yet.json")       # nothing committed yet: a snapshot, and a notice
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("--check", args)
+        self.assertIn("::notice title=📸 No declared controls yet::", output)
+
+        for outside in ("../secrets.json", "controls/../../x.json", "controls/$(id).json"):
+            code, output, args = run(outside)
+            self.assertEqual((code, args), (1, None), outside)
+            self.assertIn("check must be a relative path inside the repository", output)
+            self.assertNotIn(outside, output)                   # what failed the check is not echoed
 
 if __name__ == "__main__":
     unittest.main()
