@@ -5,6 +5,9 @@ Run from the repository root:  python3 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import base64
+import contextlib
+import hashlib
+import io
 import json
 import os
 import re
@@ -14,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EVIDENCE = REPO_ROOT / "evidence"
@@ -22,10 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cli  # noqa: E402
 import collection  # noqa: E402
+import display  # noqa: E402
 import schema  # noqa: E402
 import signing  # noqa: E402
 import verification  # noqa: E402
 from core import EvidenceError, pae  # noqa: E402
+from core import evidence_type as core_evidence_type  # noqa: E402
 from mock_services import REPO, SCANNERS, SHA, Services, fake_scanner, openssl  # noqa: E402
 
 SUBJECT = "apps-generic-local/payments/1.0/payments.jar"
@@ -37,6 +43,8 @@ TRUFFLEHOG_OUTPUT = (SCANNERS / "trufflehog.jsonl").read_text()
 GRYPE_OUTPUT = (SCANNERS / "grype.json").read_text()
 SCANNER_VERSIONS = json.loads((SCANNERS / "versions.json").read_text())
 REMOVED_SECRET = "SECRET-REMOVED-BY-RECORD-PY"
+# JUnit XML written by Maven Surefire, pytest and Node's test runner for samples/, passing and failing.
+REPORTS = Path(__file__).resolve().parent / "reports"
 
 
 class Kit(unittest.TestCase):
@@ -142,22 +150,27 @@ class KitTest(Kit):
         self.assertEqual([a["login"] for a in approval["predicate"]["approvers"]], ["bob"])
         self.assertEqual(self.deployed("code-quality-gate")[0]["statement"]["predicate"]["analysisId"], "AX-1")
         self.assertEqual(self.deployed("custom")[0]["statement"]["predicate"]["declaredBy"], REPO)
-        self.assertIn("| peer-approval | v1 | attached | pass |", summary)
+        self.assertIn("| ✅ | `peer-approval` v1 | 🟢 pass | 👥 1 approval on pull request #7 |", summary)
 
     def test_one_login_per_key_family_and_one_jfrog_exchange(self):
         self.run_all()
         self.assertEqual(sorted(role for role, _ in self.services.vault_logins),
                          ["evidence-approval-prod", "evidence-scan-prod", "evidence-self-prod"])
-        self.assertEqual({jwt for _, jwt in self.services.vault_logins}, {"jwt-for-https://vault.acme-bank.example"})
-        self.assertEqual(self.services.jfrog_exchanges, ["jwt-for-jfrog-evidence"])
+        # Each token was asked for its own audience.
+        self.assertEqual({signing.claims(jwt)["aud"] for _, jwt in self.services.vault_logins},
+                         {"https://vault.acme-bank.example"})
+        self.assertEqual([signing.claims(jwt)["aud"] for jwt in self.services.jfrog_exchanges], ["jfrog-evidence"])
 
     def test_secrets_are_masked_and_never_printed(self):
-        _, output, _ = self.run_all()
+        _, output, summary = self.run_all()
         self.assertIn("::add-mask::squ_secret", output)
         self.assertIn("::add-mask::jf.token", output)
+        self.assertIn("::add-mask::eyJ", output)    # GitHub's identity tokens: a JWT starts with eyJ
         leaks = [line for line in output.splitlines()
-                 if ("squ_secret" in line or "hvs." in line or "jf.token" in line) and not line.startswith("::add-mask::")]
+                 if any(token in line for token in ("squ_secret", "hvs.", "jf.token", "eyJ"))
+                 and not line.startswith("::add-mask::")]
         self.assertEqual(leaks, [])
+        self.assertFalse(any(token in summary for token in ("squ_secret", "hvs.", "jf.token", "eyJ")))
 
     def test_pss_signatures_carry_the_ps256_key_id(self):
         code, output, _ = self.run_all(settings=self.services.settings(**{"vault.signatureAlgorithm": "pss"}))
@@ -186,7 +199,7 @@ class KitTest(Kit):
         gate = self.deployed("code-quality-gate")[0]
         self.assertTrue(gate["verified"])
         self.assertEqual(gate["statement"]["predicate"]["result"], "fail")
-        self.assertIn("| code-quality-gate | v1 | attached | fail |", summary)
+        self.assertIn("| ✅ | `code-quality-gate` v1 | 🔴 fail | 📏 quality gate ERROR: new\\_coverage |", summary)
 
     def test_enforce_blocks_on_a_failed_check_but_still_attaches_it(self):
         self.services.gate_status = "ERROR"
@@ -217,7 +230,7 @@ class KitTest(Kit):
         self.assertIn("SonarQube has no analysis of commit", output)
         self.assertEqual(self.deployed("code-quality-gate"), [])
         self.assertEqual(len(self.services.deployed), 2)
-        self.assertIn("| code-quality-gate | v1 | error |", summary)
+        self.assertIn("| ❌ | `code-quality-gate` v1 | | | the facts could not be established", summary)
 
     def test_bad_requests_are_rejected_before_any_token_is_requested(self):
         cases = [
@@ -295,7 +308,7 @@ class ScannerTest(Kit):
 
     def test_secret_detection_records_where_secrets_are_never_the_secrets(self):
         calls = self.fake("trufflehog", TRUFFLEHOG_OUTPUT)
-        code, output, _ = self.collect("secret-detection")
+        code, output, summary = self.collect("secret-detection")
         self.assertEqual(code, 0, output)
         predicate = self.collected("secret-detection")
         self.assertEqual(predicate["result"], "fail")
@@ -305,10 +318,12 @@ class ScannerTest(Kit):
                          [("SlackWebhook", "config/settings.py", 1), ("PrivateKey", "deploy-key.pem", 1)])
         # The recording holds this marker wherever TruffleHog printed the secret.
         self.assertIn(REMOVED_SECRET, TRUFFLEHOG_OUTPUT)
-        self.assertNotIn(REMOVED_SECRET, json.dumps(predicate) + output)
+        self.assertNotIn(REMOVED_SECRET, json.dumps(predicate) + output + summary)
+        self.assertIn("| ✅ | `secret-detection` v1 | 🔴 fail | 🔑 2 secrets found: 2 unverified |", summary)
         argv = self.calls(calls)[-1]["argv"]
-        self.assertEqual(argv[:4] + argv[6:], ["filesystem", ".", "--json", "--no-update", "--no-verification"])
-        self.assertEqual(argv[4], "--exclude-paths")   # .git, so its objects are not reported a second time
+        self.assertEqual(argv[:5] + argv[7:],
+                         ["filesystem", ".", "--json", "--no-update", "--local-dev", "--no-verification"])
+        self.assertEqual(argv[5], "--exclude-paths")   # .git, so its objects are not reported a second time
 
     def test_secret_verification_is_off_unless_asked(self):
         calls = self.fake("trufflehog", TRUFFLEHOG_OUTPUT)
@@ -359,6 +374,15 @@ class ScannerTest(Kit):
         self.assertEqual(code, 0, output)
         self.assertEqual(self.calls(calls)[-1]["env"]["GRYPE_DB_CACHE_DIR"], cache)
 
+    def test_sca_scans_the_artifact_itself(self):
+        calls = self.fake("grype", GRYPE_OUTPUT)
+        artifact = self.tmp / "hello-maven.jar"
+        artifact.write_bytes(b"jar")
+        code, output, _ = self.collect("sca", f"sca-target=file:{artifact}")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.collected("sca")["target"], f"file:{artifact}")
+        self.assertEqual(self.calls(calls)[-1]["argv"], [f"file:{artifact}", "--output", "json"])
+
     def test_sca_fail_on_sets_the_threshold(self):
         report = json.loads(GRYPE_OUTPUT)
         report["matches"] = [m for m in report["matches"] if m["vulnerability"]["severity"] == "Medium"]
@@ -370,7 +394,7 @@ class ScannerTest(Kit):
 
     def test_bad_scanner_parameters_are_refused(self):
         self.fake("grype", GRYPE_OUTPUT)
-        cases = [("sca-target=registry:alpine:3.18", "sca-target must be dir:<path> or sbom:<file>"),
+        cases = [("sca-target=registry:alpine:3.18", "sca-target must be dir:<path>, sbom:<file> or file:<file>"),
                  ("sca-fail-on=urgent", "sca-fail-on must be one of critical, high, medium, low, negligible")]
         for pair, message in cases:
             code, output, _ = self.collect("sca", pair)
@@ -508,8 +532,8 @@ class SchemaTest(unittest.TestCase):
         self.assertIn("$.n: unsupported keyword(s): minimum", str(caught.exception))
 
 
-class FileStoreTest(Kit):
-    """Collect in one job, sign with Vault Transit in another, and store DSSE envelopes as files: no JFrog."""
+class FileStore(Kit):
+    """Helpers to sign collected predicates into DSSE envelope files and verify them."""
 
     TYPES = "peer-approval,custom"
 
@@ -520,8 +544,8 @@ class FileStoreTest(Kit):
     def file_settings(self, **overrides):
         return self.services.settings(store="file", **overrides)
 
-    def sign(self, types=TYPES, *extra, settings=None, **kwargs):
-        return self.run_cli("sign", "--types", types, "--predicates", str(self.out), "--subject-repo-path", SUBJECT,
+    def sign(self, types=None, *extra, settings=None, **kwargs):
+        return self.run_cli("sign", "--types", types or self.TYPES, "--predicates", str(self.out), "--subject-repo-path", SUBJECT,
                             "--subject-sha256", SUBJECT_SHA, "--out", str(self.envelopes), *extra,
                             settings=settings or self.file_settings(), **kwargs)
 
@@ -529,9 +553,15 @@ class FileStoreTest(Kit):
         return json.loads((self.envelopes / f"{type_id}.dsse.json").read_text())
 
     def verify(self, *extra, keys=None, **kwargs):
-        keys = keys or self.trusted_keys("evd-approval-prod-v3", "evd-scan-prod-v3", "evd-self-prod-v3")
+        keys = keys or self.trusted_keys("evd-approval-prod-v3", "evd-scan-prod-v3", "evd-self-prod-v3",
+                                         "evd-build-prod-v3")
         return self.run_cli("verify", "--envelopes", str(self.envelopes), "--keys", str(keys), *extra,
                             settings=self.file_settings(), **kwargs)
+
+
+
+class FileStoreTest(FileStore):
+    """Collect in one job, sign with Vault Transit in another, and store DSSE envelopes as files: no JFrog."""
 
     def collect_and_sign(self, **kwargs):
         code, output, _ = self.collect(self.TYPES, f"predicate-file={self.predicate_file}")
@@ -552,9 +582,56 @@ class FileStoreTest(Kit):
             self.assertEqual(statement["subject"], [{"name": SUBJECT, "digest": {"sha256": SUBJECT_SHA}}])
             self.assertEqual(statement["predicateType"], f"https://evidence.acme-bank.example/{type_id}/v1")
             self.assertEqual(statement["predicate"], self.collected(type_id))
-        self.assertIn("| peer-approval | v1 | signed | pass | evd-approval-prod-v3 |", summary)
+        self.assertIn("| ✅ | `peer-approval` v1 | 🟢 pass | 👥 1 approval on pull request #7 | `evd-approval-prod-v3` |", summary)
         self.assertEqual(sorted(self.services.sign_calls), ["evd-approval-prod", "evd-self-prod"])
         self.assertEqual((self.services.jfrog_exchanges, self.services.deployed), ([], []))
+
+    def test_the_log_follows_each_step_of_vault_transit_signing(self):
+        code, output, summary = self.collect_and_sign()
+        self.assertEqual(code, 0, output)
+        envelope = self.envelope("custom")
+        signed = pae(envelope["payloadType"], base64.b64decode(envelope["payload"]))
+        digest = hashlib.sha256(signed).hexdigest()
+        workflow = f"{REPO}/.github/workflows/evidence.yml@refs/heads/main"
+        for line in (
+            f"🏦 Vault {self.services.url}, namespace platform: login at auth/github-actions, Transit at transit-evidence,"
+            " RSA PKCS#1 v1.5 with SHA-256",
+            f"📜 In-toto statement about {SUBJECT}, SHA-256 {SUBJECT_SHA}: https://evidence.acme-bank.example/custom/v1,"
+            f" {len(base64.b64decode(envelope['payload'])):,} bytes",
+            "🪪 Identity token from GitHub's OIDC endpoint, valid until 08:05:00 UTC."
+            " Vault checks these claims against role evidence-self-prod:",
+            "     aud                  https://vault.acme-bank.example",
+            f"     job_workflow_ref     {workflow}",
+            "     runner_environment   self-hosted",
+            "     repository_owner_id  71595780",
+            "🔐 Vault login with role evidence-self-prod: batch token, valid 10m, policies evidence-self-prod-transit-sign."
+            " Request login-2,",
+            f"✍️ Transit sign with evd-self-prod: RSA PKCS#1 v1.5 over the SHA-256 of {len(signed):,} bytes,"
+            f" the statement's DSSE encoding. Their SHA-256: {digest}",
+            "✅ Vault signed with evd-self-prod version 3, key id evd-self-prod-v3: a 256-byte signature. Request sign-2,",
+        ):
+            self.assertIn(line, output)
+        # The sign job's summary says the same, after the table of evidence.
+        self.assertLess(summary.index("### 🔏 Evidence signed"), summary.index("### 🔐 How Vault Transit signed"))
+        self.assertRegex(summary, r"\| ✅ \| role `evidence-self-prod` \| `aud` `https://vault.acme-bank.example`<br>"
+                                  rf"`job_workflow_ref` `{re.escape(workflow)}`<br>.*\| batch token, valid 10m, policies"
+                                  r" `evidence-self-prod-transit-sign` \| `login-2` · \d+ ms \|")
+        self.assertRegex(summary, rf"\| ✅ \| `custom` v1 \| `evd-self-prod` version 3, RSA PKCS#1 v1.5 \| {len(signed):,}"
+                                  rf" bytes, SHA-256 `{digest[:16]}…` \| key id `evd-self-prod-v3` · request `sign-2` · \d+ ms \|")
+
+    def test_a_refused_login_shows_the_claims_vault_refused(self):
+        code, output, _ = self.collect(self.TYPES, f"predicate-file={self.predicate_file}")
+        self.assertEqual(code, 0, output)
+        self.services.refuse_logins = True
+        code, output, summary = self.sign()
+        self.assertEqual(code, 1)
+        refusal = "does not match any associated bound claim values"
+        # The log shows the claims before the login, so the refusal can be read against them.
+        self.assertLess(output.index(f"     job_workflow_ref     {REPO}/.github/workflows/evidence.yml@refs/heads/main"),
+                        output.index(f"⛔ POST {self.services.url}/v1/auth/github-actions/login returned 400"))
+        self.assertIn(refusal, output)
+        self.assertRegex(summary, r"\| ❌ \| role `evidence-approval-prod` \| `aud` .*\| .*does not match any associated")
+        self.assertEqual(self.services.sign_calls, [])
 
     def test_pss_envelopes_verify(self):
         code, output, _ = self.collect_and_sign(settings=self.file_settings(**{"vault.signatureAlgorithm": "pss"}))
@@ -634,8 +711,26 @@ class FileStoreTest(Kit):
         self.collect_and_sign()
         code, output, summary = self.verify("--subject-sha256", SUBJECT_SHA, "--types", self.TYPES)
         self.assertEqual(code, 0, output)
-        self.assertIn("| custom | v1 | verified | n/a | evd-self-prod-v3 |", summary)
-        self.assertIn("| peer-approval | v1 | verified | pass | evd-approval-prod-v3 |", summary)
+        self.assertIn("| ✅ | `custom` v1 | ⚪ n/a | 📝 1 claim by acme-bank/payments: loadTest | `evd-self-prod-v3` |", summary)
+        self.assertIn("| ✅ | `peer-approval` v1 | 🟢 pass | 👥 1 approval on pull request #7 | `evd-approval-prod-v3` |", summary)
+        self.assertIn(f"🎯 `{SUBJECT}` · SHA-256 `{SUBJECT_SHA}`", summary)
+        self.assertIn("**2 of 2 verified · 🟢 1 pass · ⚪ 1 n/a**", summary)
+        # Each verified statement follows, folded: what a reviewer reads, after the signature held.
+        self.assertIn("<details><summary>✅ <code>custom</code> v1 · ⚪ n/a · 📝 1 claim by acme-bank/payments: loadTest"
+                      " · signed by <code>evd-self-prod-v3</code></summary>", summary)
+        self.assertIn('"p95Ms": 180', summary)
+        self.assertIn("::group::🧾 peer-approval v1: the verified statement", output)
+
+    def test_verify_reads_a_folder_per_artifact(self):
+        """Downloading a run's envelopes gives a folder per call of evidence.yml: evidence-envelopes-<type>/."""
+        self.collect_and_sign()
+        for path in list(self.envelopes.glob("*.dsse.json")):
+            folder = self.envelopes / f"evidence-envelopes-{path.name[:-len('.dsse.json')]}"
+            folder.mkdir()
+            path.rename(folder / path.name)
+        code, output, _ = self.verify("--subject-sha256", SUBJECT_SHA, "--types", self.TYPES)
+        self.assertEqual(code, 0, output)
+        self.assertIn("🧾 2 of 2 verified", output)
 
     def test_verify_needs_no_vault_and_no_jfrog(self):
         self.collect_and_sign()
@@ -693,14 +788,264 @@ class FileStoreTest(Kit):
         self.addCleanup(os.environ.pop, "EVD_VAULT_JWT_FILE")
         settings = self.file_settings(identity="file")
         kind = "https://evidence.acme-bank.example/peer-approval/v1"
-        key_id, envelope = signing.envelope(self.collected("peer-approval"), kind, "self", SUBJECT, SUBJECT_SHA,
-                                            signing.Vault(settings))
+        with contextlib.redirect_stdout(io.StringIO()):
+            key_id, envelope = signing.envelope(self.collected("peer-approval"), kind, "self", SUBJECT, SUBJECT_SHA,
+                                                signing.Vault(settings))
         self.assertEqual(key_id, "evd-self-prod-v3")
         keys = verification.load_trusted_keys(self.trusted_keys("evd-self-prod-v3"))
         with self.assertRaises(EvidenceError) as caught:
             verification.verify(envelope, keys, cli.load_catalog(), settings)
         self.assertIn("peer-approval evidence must be signed with an evd-approval-prod key, not 'evd-self-prod-v3'",
                       str(caught.exception))
+
+
+class BuildEvidenceTest(FileStore):
+    """test-results and provenance: what the squad's own build did, signed with the build key."""
+
+    TYPES = "test-results,provenance"
+    # What GitHub sets for a run of the squad's workflow.
+    GITHUB = {
+        "GITHUB_SERVER_URL": "https://github.com",
+        "GITHUB_WORKFLOW_REF": f"{REPO}/.github/workflows/hello-maven.yml@refs/heads/main",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REPOSITORY_ID": "1460010558",
+        "GITHUB_REPOSITORY_OWNER_ID": "71595780",
+        "GITHUB_RUN_ID": "44001716002",
+        "GITHUB_RUN_ATTEMPT": "2",
+        "RUNNER_ENVIRONMENT": "self-hosted",
+    }
+
+    def collect_build(self, reports=REPORTS / "surefire-pass", **github):
+        return self.collect(self.TYPES, f"test-reports={reports}", extra_env={**self.GITHUB, **github})
+
+    def test_every_tool_reports_the_same_way(self):
+        expected = {
+            "surefire-pass": {"tests": 4, "passed": 4, "failed": 0, "errored": 0, "skipped": 0, "flaky": 0},
+            "surefire-fail": {"tests": 8, "passed": 5, "failed": 1, "errored": 1, "skipped": 1, "flaky": 1},
+            "pytest-pass": {"tests": 3, "passed": 3, "failed": 0, "errored": 0, "skipped": 0, "flaky": 0},
+            "pytest-fail": {"tests": 6, "passed": 3, "failed": 1, "errored": 1, "skipped": 1, "flaky": 0},
+            "node-pass": {"tests": 3, "passed": 3, "failed": 0, "errored": 0, "skipped": 0, "flaky": 0},
+            "node-fail": {"tests": 6, "passed": 4, "failed": 1, "errored": 0, "skipped": 1, "flaky": 0},
+        }
+        for name, summary in expected.items():
+            with self.subTest(name):
+                code, output, _ = self.collect("test-results", f"test-reports={REPORTS / name}")
+                self.assertEqual(code, 0, output)
+                predicate = self.collected("test-results")
+                self.assertEqual(predicate["summary"], summary)
+                self.assertEqual(predicate["result"], "pass" if name.endswith("-pass") else "fail")
+                self.assertEqual(predicate["commit"], SHA)
+                self.assertEqual(len(predicate["failedTests"]), summary["failed"] + summary["errored"])
+                # The failing tests assert with a message that holds "token=should-never-reach-the-evidence".
+                self.assertNotIn("should-never-reach-the-evidence", json.dumps(predicate))
+                for report in predicate["reports"]:
+                    raw = (REPORTS / name / report["file"]).read_bytes()
+                    self.assertEqual(report["sha256"], hashlib.sha256(raw).hexdigest())
+
+    def test_failed_tests_are_named_with_their_report(self):
+        self.collect("test-results", f"test-reports={REPORTS / 'surefire-fail'}")
+        self.assertEqual(self.collected("test-results")["failedTests"], [
+            {"suite": "lab.hello.BrokenTest", "test": "greetsInFrench", "outcome": "failed",
+             "report": "TEST-lab.hello.BrokenTest.xml"},
+            {"suite": "lab.hello.BrokenTest", "test": "throwsInsteadOfAsserting", "outcome": "errored",
+             "report": "TEST-lab.hello.BrokenTest.xml"}])
+
+    def test_no_test_at_all_is_a_fail(self):
+        """What a build run with -DskipTests uploads: reports with no test case in them."""
+        reports = self.tmp / "skipped"
+        reports.mkdir()
+        (reports / "TEST-lab.hello.AppTest.xml").write_text('<testsuite name="lab.hello.AppTest" tests="0"/>')
+        self.collect("test-results", f"test-reports={reports}")
+        predicate = self.collected("test-results")
+        self.assertEqual((predicate["result"], predicate["summary"]["tests"]), ("fail", 0))
+
+    def test_xml_that_is_not_a_test_report_is_skipped(self):
+        reports = self.tmp / "failsafe"
+        shutil.copytree(REPORTS / "surefire-pass", reports)
+        (reports / "failsafe-summary.xml").write_text("<failsafe-summary result='0'><completed>4</completed></failsafe-summary>")
+        self.collect("test-results", f"test-reports={reports}")
+        predicate = self.collected("test-results")
+        self.assertEqual([r["file"] for r in predicate["reports"]], ["TEST-lab.hello.AppTest.xml"])
+
+    def test_reports_that_cannot_be_read_are_an_error_not_a_pass(self):
+        empty, broken = self.tmp / "empty", self.tmp / "broken"
+        empty.mkdir()
+        broken.mkdir()
+        (broken / "junit.xml").write_text("<testsuites><testsuite>")
+        for folder, message in ((self.tmp / "missing", "is not a directory"),
+                                (empty, "no JUnit XML report"),
+                                (broken, "junit.xml is not well-formed XML")):
+            with self.subTest(message):
+                code, output, _ = self.collect("test-results", f"test-reports={folder}")
+                self.assertEqual(code, 1, output)
+                self.assertIn(message, output)
+                self.assertFalse((self.out / "test-results.json").exists())
+
+    def test_provenance_is_slsa_with_github_workflow_build_type(self):
+        code, output, _ = self.collect("provenance", extra_env=self.GITHUB)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.collected("provenance"), {
+            "buildDefinition": {
+                "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+                "externalParameters": {"workflow": {"ref": "refs/heads/main", "repository": f"https://github.com/{REPO}",
+                                                    "path": ".github/workflows/hello-maven.yml"}},
+                "internalParameters": {"github": {"event_name": "push", "repository_id": "1460010558",
+                                                  "repository_owner_id": "71595780",
+                                                  "runner_environment": "self-hosted"}},
+                "resolvedDependencies": [{"uri": f"git+https://github.com/{REPO}@refs/heads/main",
+                                          "digest": {"gitCommit": SHA}}],
+            },
+            "runDetails": {
+                "builder": {"id": f"https://github.com/{REPO}/.github/workflows/hello-maven.yml@refs/heads/main"},
+                "metadata": {"invocationId": f"https://github.com/{REPO}/actions/runs/44001716002/attempts/2"},
+            },
+        })
+
+    def test_provenance_refuses_a_workflow_of_another_repository(self):
+        code, output, _ = self.collect(
+            "provenance", extra_env={**self.GITHUB, "GITHUB_WORKFLOW_REF": "evil/repo/.github/workflows/x.yml@refs/heads/main"})
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"does not name a workflow of {REPO}", output)
+
+    def test_build_evidence_is_signed_with_the_build_key_and_provenance_as_slsa(self):
+        code, output, _ = self.collect_build()
+        self.assertEqual(code, 0, output)
+        code, output, _ = self.sign(settings=self.file_settings())
+        self.assertEqual(code, 0, output)
+        self.assertEqual(sorted(self.services.sign_calls), ["evd-build-prod", "evd-build-prod"])
+        provenance = json.loads(base64.b64decode(self.envelope("provenance")["payload"]))
+        self.assertEqual(provenance["predicateType"], "https://slsa.dev/provenance/v1")
+        self.assertEqual(provenance["subject"], [{"name": SUBJECT, "digest": {"sha256": SUBJECT_SHA}}])
+        tests = json.loads(base64.b64decode(self.envelope("test-results")["payload"]))
+        self.assertEqual(tests["predicateType"], "https://evidence.acme-bank.example/test-results/v1")
+        for type_id in ("provenance", "test-results"):
+            self.assertTrue(self.openssl_verifies(self.envelope(type_id)), type_id)
+
+        code, output, _ = self.verify("--subject-sha256", SUBJECT_SHA, "--types", self.TYPES)
+        self.assertEqual(code, 0, output)
+        self.assertIn("✅ provenance v1: verified · ⚪ n/a · 🏗️ hello-maven.yml on refs/heads/main, commit aaaaaaaaaaaa,"
+                      " run 44001716002 attempt 2 · signed by evd-build-prod-v3", output)
+        self.assertIn("✅ test-results v1: verified · 🟢 pass · 🧪 4 tests: 4 passed · signed by evd-build-prod-v3", output)
+
+    def test_a_scan_key_cannot_vouch_for_build_evidence(self):
+        self.collect_build()
+        jwt = self.tmp / "vault.jwt"
+        jwt.write_text("jwt")
+        os.environ["EVD_VAULT_JWT_FILE"] = str(jwt)
+        self.addCleanup(os.environ.pop, "EVD_VAULT_JWT_FILE")
+        settings = self.file_settings(identity="file")
+        with contextlib.redirect_stdout(io.StringIO()):
+            _, envelope = signing.envelope(self.collected("provenance"), "https://slsa.dev/provenance/v1", "scan",
+                                           SUBJECT, SUBJECT_SHA, signing.Vault(settings))
+        keys = verification.load_trusted_keys(self.trusted_keys("evd-scan-prod-v3"))
+        with self.assertRaises(EvidenceError) as caught:
+            verification.verify(envelope, keys, cli.load_catalog(), settings)
+        self.assertIn("provenance evidence must be signed with an evd-build-prod key", str(caught.exception))
+
+    def test_a_standard_predicate_type_names_one_type_only(self):
+        settings = self.services.settings()
+        catalog = cli.load_catalog()
+        self.assertEqual(core_evidence_type("https://slsa.dev/provenance/v1", catalog, settings), ("provenance", "v1"))
+        # The kit's own name for that type and version is not accepted: only the standard one is.
+        with self.assertRaises(EvidenceError):
+            core_evidence_type("https://evidence.acme-bank.example/provenance/v1", catalog, settings)
+        self.assertEqual(core_evidence_type("https://evidence.acme-bank.example/sca/v1", catalog, settings), ("sca", "v1"))
+
+
+class ProvenanceAttestationTest(FileStore):
+    """GitHub's attestation of the artifact, verified with gh, then signed with the build key."""
+
+    TYPES = "provenance-attestation"
+    # gh attestation verify, recorded by scanners/record.py on the attestation of gh's own release archive.
+    RECORDED = json.loads((SCANNERS / "gh-attestation.json").read_text())
+    SIGNER = f"{REPO}/.github/workflows/evidence.yml"
+
+    def setUp(self):
+        super().setUp()
+        self.artifact = self.tmp / "hello-maven.jar"
+        self.artifact.write_bytes(b"the squad's jar")
+        self.sha256 = hashlib.sha256(b"the squad's jar").hexdigest()
+
+    def gh(self, output=None, **kwargs):
+        """A stand-in gh that answers as the recorded one did. Returns its calls' log."""
+        if output is None:
+            recorded = json.loads(json.dumps(self.RECORDED))
+            # The recording is about gh's archive: the stand-in vouches for this test's artifact instead.
+            for subject in recorded[0]["verificationResult"]["statement"]["subject"]:
+                if subject["digest"]["sha256"] == SCANNER_VERSIONS["gh"]["sha256"]:
+                    subject["digest"]["sha256"] = self.sha256
+            output = json.dumps(recorded)
+        return self.fake("gh", output, version=f"gh version {SCANNER_VERSIONS['gh']['version']} (2026-09-30)", **kwargs)
+
+    def collect_attestation(self):
+        return self.collect(self.TYPES, f"attested-file={self.artifact}", f"attestation-signer={self.SIGNER}")
+
+    def test_a_verified_attestation_is_recorded_then_signed_with_the_build_key(self):
+        calls = self.gh()
+        code, output, _ = self.collect_attestation()
+        self.assertEqual(code, 0, output)
+        predicate = self.collected("provenance-attestation")
+        self.assertEqual(predicate["result"], "pass")
+        self.assertEqual(predicate["artifact"], {"file": "hello-maven.jar", "sha256": self.sha256})
+        self.assertEqual(predicate["verifier"], {"name": "gh", "version": SCANNER_VERSIONS["gh"]["version"]})
+        self.assertEqual(predicate["policy"], {"repository": REPO, "signerWorkflow": self.SIGNER, "sourceDigest": SHA,
+                                               "predicateType": "https://slsa.dev/provenance/v1"})
+        attestation = predicate["attestations"][0]
+        self.assertEqual(attestation["signer"], "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/trunk")
+        self.assertEqual(attestation["sourceDigest"], SCANNER_VERSIONS["gh"]["commit"])
+        self.assertEqual(attestation["subjects"], [SCANNER_VERSIONS["gh"]["file"]])   # of the 21 the statement names
+        self.assertEqual([t["authority"] for t in attestation["timestamps"]], ["https://rekor.sigstore.dev"])
+        self.assertEqual(len(attestation["transparencyLogIndexes"]), 1)
+        # gh enforced the policy, with the job's token: this repository, the platform's workflow, this commit.
+        verify = [call for call in self.calls(calls) if call["argv"][:2] == ["attestation", "verify"]]
+        self.assertEqual(verify[0]["argv"], [
+            "attestation", "verify", str(self.artifact), "--repo", REPO, "--signer-workflow", self.SIGNER,
+            "--source-digest", SHA, "--predicate-type", "https://slsa.dev/provenance/v1", "--format", "json"])
+        self.assertEqual(verify[0]["env"]["GH_TOKEN"], "ghs_token")
+        # What the attestation says, never the bundle: no certificate or signature reaches the predicate.
+        bundle = self.RECORDED[0]["attestation"]["bundle"]
+        self.assertNotIn(bundle["dsseEnvelope"]["signatures"][0]["sig"], json.dumps(predicate))
+        self.assertNotIn(bundle["verificationMaterial"]["certificate"]["rawBytes"][:40], json.dumps(predicate))
+
+        code, output, _ = self.sign()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.envelope("provenance-attestation")["signatures"][0]["keyid"], "evd-build-prod-v3")
+        code, output, _ = self.verify("--subject-sha256", SUBJECT_SHA, "--types", self.TYPES)
+        self.assertEqual(code, 0, output)
+        self.assertIn("✅ provenance-attestation v1: verified · 🟢 pass · 🪪 1 GitHub attestation verified: signed by"
+                      " deployment.yml on refs/heads/trunk, logged by rekor.sigstore.dev · signed by evd-build-prod-v3",
+                      output)
+
+    def test_no_attestation_is_a_fail_and_is_signed(self):
+        """What the lab's private repository answers on GitHub's Free plan: no attestations, ever."""
+        for message in ("Error: HTTP 404: Not Found (https://api.github.com/repos/x/y/attestations/sha256:0)",
+                        "Error: no attestations found"):
+            with self.subTest(message):
+                self.gh("", exit_code=1, stderr=message)
+                code, output, _ = self.collect_attestation()
+                self.assertEqual(code, 0, output)
+                predicate = self.collected("provenance-attestation")
+                self.assertEqual((predicate["result"], predicate["summary"], predicate["attestations"]),
+                                 ("fail", {"verified": 0}, []))
+                self.assertEqual(predicate["reason"],
+                                 f"GitHub holds no provenance attestation for these bytes: {message[len('Error: '):]}")
+        code, output, _ = self.sign()
+        self.assertEqual(code, 0, output)
+        code, output, _ = self.verify("--types", self.TYPES)
+        self.assertIn("🔴 fail · 🪪 GitHub holds no attestation for these bytes", output)
+
+    def test_an_attestation_that_does_not_verify_is_an_error_not_a_fail(self):
+        self.gh("", exit_code=1, stderr=f"Error: expected SourceRepositoryDigest to be {SHA}, got {'f' * 40}")
+        code, output, _ = self.collect_attestation()
+        self.assertEqual(code, 1)
+        self.assertIn("gh could not verify GitHub's attestation for these bytes: expected SourceRepositoryDigest", output)
+        self.assertFalse((self.out / "provenance-attestation.json").exists())
+
+        self.gh("[]")
+        code, output, _ = self.collect_attestation()
+        self.assertEqual(code, 1)
+        self.assertIn("gh verified the attestations but listed none", output)
 
 
 class VerificationTest(unittest.TestCase):
@@ -741,20 +1086,133 @@ class VerificationTest(unittest.TestCase):
             verification.load_public_key(ec_public)
 
 
-class WorkflowTest(unittest.TestCase):
-    """The reusable workflow keeps scanners away from the signing token."""
+class DisplayTest(unittest.TestCase):
+    """What a job's log and step summary say about evidence. Squads write some of it, so it is escaped."""
 
-    WORKFLOW = REPO_ROOT / ".github" / "workflows" / "evidence.yml"
+    def report(self, rows, **kwargs):
+        summary = Path(tempfile.mkdtemp(prefix="evidence-summary-")) / "summary.md"
+        self.addCleanup(shutil.rmtree, summary.parent, ignore_errors=True)
+        printed = io.StringIO()
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": str(summary)}), \
+                contextlib.redirect_stdout(printed):
+            display.report(rows, "heading", "verified", "signed by", "Signed by", **kwargs)
+        return printed.getvalue(), summary.read_text()
+
+    def test_each_type_says_what_it_found_in_one_line(self):
+        expected = {
+            "secret-detection/v1/examples/pass.json": "🔑 no secrets found",
+            "secret-detection/v1/examples/fail.json": "🔑 2 secrets found: 2 unverified",
+            "sca/v2/examples/pass.json": "🐞 no known vulnerabilities",
+            "sca/v2/examples/fail.json": "🐞 13 vulnerabilities: 2 critical, 2 high, 9 medium (fails on high)",
+            "test-results/v1/examples/pass.json": "🧪 4 tests: 4 passed",
+            "test-results/v1/examples/fail.json": "🧪 8 tests: 5 passed, 1 failed, 1 errored, 1 skipped, 1 flaky",
+            "provenance/v1/examples/hello-maven.json":
+                "🏗️ hello-maven.yml on refs/heads/main, commit 3affa072b111, run 44001716002 attempt 1",
+            "peer-approval/v1/examples/pass.json": "👥 1 approval on pull request #7",
+            "peer-approval/v1/examples/fail-no-pull-request.json": "👥 no pull request for this commit",
+            "code-quality-gate/v1/examples/fail.json": "📏 quality gate ERROR: new_coverage",
+            "custom/v1/examples/load-test.json": "📝 1 claim by acme-bank/payments: loadTest",
+            "provenance-attestation/v1/examples/gh-release.json":
+                "🪪 1 GitHub attestation verified: signed by deployment.yml on refs/heads/trunk, logged by rekor.sigstore.dev",
+            "provenance-attestation/v1/examples/private-repository.json": "🪪 GitHub holds no attestation for these bytes",
+        }
+        for example, line in expected.items():
+            with self.subTest(example):
+                type_id = example.split("/", 1)[0]
+                predicate = json.loads((EVIDENCE / "collectors" / example).read_text())
+                self.assertEqual(display.facts(type_id, predicate), line)
+
+    def test_a_shape_it_does_not_know_shows_the_summary_counts(self):
+        self.assertEqual(display.facts("new-type", {"summary": {"checked": 3, "skipped": 1, "complete": True}}),
+                         "3 checked, 1 skipped")
+        self.assertEqual(display.facts("provenance", {"buildDefinition": {}}), "")
+
+    def test_what_squads_wrote_cannot_break_the_table_or_add_markup(self):
+        claims = {"a | b <img src=x onerror=alert(1)> [link](https://evil.example)": 1}
+        rows = [{"type": "custom", "version": "v1", "status": "verified", "result": "n/a", "detail": "key`|`id",
+                 "predicate": {"declaredBy": "squad", "claims": claims}},
+                {"type": "sca", "version": "", "status": "error", "result": "n/a", "detail": "<b>|</b>\nsecond line"}]
+        _, summary = self.report(rows)
+        table = [line for line in summary.splitlines() if line.startswith(("| ✅", "| ❌"))]
+        self.assertEqual(len(table), 2)
+        for line in table:
+            self.assertEqual(len(re.findall(r"(?<!\\)\|", line)), 6, line)   # five columns, no more
+        # Escaped with a backslash, they show as text.
+        self.assertNotRegex(summary, r"(?<!\\)<(img|b|/b)[ >]")
+        self.assertNotRegex(summary, r"(?<!\\)\[link")
+        self.assertIn(r"\<img src=x onerror=alert(1)\>", summary)
+
+    def test_a_verified_statement_is_folded_and_cut_when_it_is_large(self):
+        predicate = {"result": "fail", "note": "```", "findings": [{"id": f"CVE-2026-{n:05}"} for n in range(5000)]}
+        statement = {"predicateType": "https://example/sca/v2", "predicate": predicate,
+                     "subject": [{"name": "app.jar", "digest": {"sha256": "0" * 64}}]}
+        rows = [{"type": "sca", "version": "v2", "status": "verified", "result": "fail", "detail": "evd-scan-lab-v1",
+                 "predicate": predicate, "statement": statement}]
+        printed, summary = self.report(rows, subject=("app.jar", "0" * 64), statements=True)
+        self.assertIn("<details><summary>✅ <code>sca</code> v2 · 🔴 fail", summary)
+        self.assertIn("\n````json\n", summary)      # longer than any backtick run in the predicate
+        self.assertIn("Cut at 20,000 characters", summary)
+        self.assertLess(len(summary), display.STATEMENT_LIMIT + 2000)
+        self.assertIn("::group::🧾 sca v2: the verified statement", printed)
+
+    def test_errors_are_annotations_encoded_as_github_reads_them(self):
+        printed = io.StringIO()
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), contextlib.redirect_stdout(printed):
+            display.announce("error", "50% done:\n then, stopped", title="sca v2: scan, failed")
+        self.assertEqual(printed.getvalue(), "::error title=sca v2%3A scan%2C failed::50%25 done: then, stopped\n")
+
+
+class WorkflowTest(unittest.TestCase):
+    """The reusable workflow keeps scanners away from the signing token, and pins what the evidence is about."""
+
+    WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+    WORKFLOW = WORKFLOWS / "evidence.yml"
+
+    def setUp(self):
+        self.runner_temp = Path(tempfile.mkdtemp(prefix="evidence-runner-"))
+        self.addCleanup(shutil.rmtree, self.runner_temp, ignore_errors=True)
 
     @classmethod
-    def jobs(cls):
-        """Each job's lines in evidence.yml, by job id. Enough YAML for these checks, without a parser."""
-        text = cls.WORKFLOW.read_text().split("\njobs:\n", 1)[1]
+    def jobs(cls, workflow=None):
+        """Each job's lines in evidence.yml, or another workflow, by job id. Enough YAML for these checks."""
+        text = (workflow or cls.WORKFLOW).read_text().split("\njobs:\n", 1)[1]
         return {match[1]: match[2] for match in re.finditer(r"(?m)^  ([a-z-]+):\n((?:(?:    .*)?\n)*)", text)}
 
-    def test_only_the_sign_job_can_request_an_id_token(self):
+    @classmethod
+    def step(cls, job, name, workflow=None):
+        """A step's lines, from its '- name:' to the next step."""
+        return cls.jobs(workflow)[job].split(f"      - name: {name}\n", 1)[1].split("\n      - ", 1)[0]
+
+    def run_step(self, job, name, workflow=None, **env):
+        """Run a step's script with bash as the runner would, python3 replaced by a recorder of its arguments.
+
+        Returns (exit code, output, the step's outputs, python3's arguments or None).
+        """
+        script = []
+        for line in self.step(job, name, workflow).split("        run: |\n", 1)[1].splitlines():
+            if line.strip() and not line.startswith(" " * 10):
+                break                       # a comment that heads the next step
+            script.append(line[10:])
+        script = "\n".join(script)
+        recorder = self.runner_temp / "bin" / "python3"
+        recorder.parent.mkdir(exist_ok=True)
+        recorder.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$RUNNER_TEMP/python3-args"\n')
+        recorder.chmod(0o755)
+        outputs = self.runner_temp / "github-output"
+        outputs.write_text("")
+        (self.runner_temp / "python3-args").unlink(missing_ok=True)
+        done = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True, cwd=self.runner_temp, env={
+            "PATH": f"{recorder.parent}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(self.runner_temp),
+            "GITHUB_OUTPUT": str(outputs), "GITHUB_WORKSPACE": str(self.runner_temp),
+            "GITHUB_STEP_SUMMARY": str(self.runner_temp / "step-summary"), **env})
+        recorded = self.runner_temp / "python3-args"
+        return (done.returncode, done.stdout + done.stderr,
+                dict(line.split("=", 1) for line in outputs.read_text().splitlines()),
+                recorded.read_text().splitlines() if recorded.exists() else None)
+
+    def test_no_job_that_runs_a_collector_can_request_an_id_token(self):
         jobs = self.jobs()
-        self.assertEqual(sorted(jobs), ["collect", "sign"])
+        self.assertEqual(sorted(jobs), ["attest", "collect", "sign"])
         self.assertNotIn("id-token", jobs["collect"])
         self.assertIn("id-token: write", jobs["sign"])
         self.assertIn("needs: collect", jobs["sign"])
@@ -762,18 +1220,244 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("args=(sign ", jobs["sign"])
         self.assertNotIn("args=(sign ", jobs["collect"])
         self.assertNotIn("install-scanners", jobs["sign"])
+        # attest holds a token too, for GitHub's Sigstore: it runs GitHub's attest action and nothing of the kit's.
+        self.assertIn("id-token: write\n      attestations: write", jobs["attest"])
+        self.assertIn("if: inputs.type == 'provenance-attestation'", jobs["attest"])
+        self.assertIn("uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2",
+                      jobs["attest"])
+        for kit in ("cli.py", "install-scanners", ".evidence-kit", "actions/checkout"):
+            self.assertNotIn(kit, jobs["attest"])
+
+    def test_collect_waits_for_the_attestation_and_sign_for_collect(self):
+        jobs = self.jobs()
+        self.assertIn("needs: attest", jobs["collect"])
+        self.assertIn("if: ${{ !cancelled() && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}",
+                      jobs["collect"])
+        self.assertIn("attestations: read", jobs["collect"])
+
+    def test_github_attests_the_file_the_platform_hashed(self):
+        subject = self.runner_temp / "subject"
+        subject.mkdir()
+        (subject / "hello-maven.jar").write_bytes(b"jar")
+        code, output, outputs, _ = self.run_step("attest", "🎯 Hash it", EVD_IN_SUBJECT_ARTIFACT="hello-maven-jar")
+        self.assertEqual((code, outputs["sha256"]), (0, hashlib.sha256(b"jar").hexdigest()), output)
+        self.assertIn("subject-digest: sha256:${{ steps.subject.outputs.sha256 }}",
+                      self.step("attest", "🪪 Have GitHub attest its build provenance"))
+
+        code, output, _, _ = self.run_step("attest", "🎯 Hash it", EVD_IN_SUBJECT_ARTIFACT="")
+        self.assertEqual(code, 1, output)
+        self.assertIn("provenance-attestation needs subject-artifact", output)
+        (subject / "notes.txt").write_text("and something else")
+        code, output, _, _ = self.run_step("attest", "🎯 Hash it", EVD_IN_SUBJECT_ARTIFACT="hello-maven-jar")
+        self.assertEqual(code, 1, output)
+        self.assertIn("must hold exactly one file, the artifact, not 2", output)
 
     def test_the_collect_job_writes_scanner_data_to_the_work_volume(self):
         jobs = self.jobs()
         self.assertIn("GRYPE_DB_CACHE_DIR: ${{ runner.temp }}/grype-db", jobs["collect"])
         self.assertIn("TMPDIR: ${{ runner.temp }}", jobs["collect"])
 
+    def test_the_sign_job_takes_what_collect_uploaded_not_any_artifact_with_that_name(self):
+        """A caller job of the same run could upload its own evidence-predicates before collect runs."""
+        jobs = self.jobs()
+        self.assertIn("predicates-id: ${{ steps.hand-off.outputs.artifact-id }}", jobs["collect"])
+        self.assertIn("id: hand-off", self.step("collect", "📤 Hand the predicate to the sign job"))
+        download = self.step("sign", "📥 Download the predicate")
+        self.assertIn("artifact-ids: ${{ needs.collect.outputs.predicates-id }}", download)
+        self.assertNotIn("name:", download)
+        # An empty id would make download-artifact take every artifact of the run. The status is explicit:
+        # the default success() would skip sign whenever attest was skipped.
+        self.assertIn("if: ${{ !cancelled() && needs.collect.result == 'success'"
+                      " && needs.collect.outputs.predicates-id != '' }}", jobs["sign"])
+        self.assertIn("EVD_IN_SHA256: ${{ needs.collect.outputs.subject-sha256 }}", jobs["sign"])
+
+    def test_the_platform_hashes_the_artifact_itself(self):
+        subject = self.runner_temp / "subject"
+        subject.mkdir()
+        (subject / "hello-maven.jar").write_bytes(b"jar")
+        sha256 = hashlib.sha256(b"jar").hexdigest()
+        pin = dict(EVD_IN_TYPE="provenance", EVD_IN_SHA256="", EVD_IN_SUBJECT_ARTIFACT="hello-maven-jar",
+                   EVD_IN_SUBJECT="lab/hello|<b>`x`</b>.jar")
+
+        code, output, outputs, _ = self.run_step("collect", "🎯 Pin the subject", **pin)
+        self.assertEqual(code, 0, output)
+        self.assertEqual((outputs["sha256"], outputs["file"]), (sha256, str(subject / "hello-maven.jar")))
+        self.assertIn(f"🔒 SHA-256 computed here, from the downloaded file: {sha256}", output)
+        summary = (self.runner_temp / "step-summary").read_text()
+        self.assertIn(f"| 🔒 SHA-256 | `{sha256}`, computed here, from the downloaded file |", summary)
+        self.assertIn("| 📦 Artifact | `hello-maven.jar`, 3 bytes, from the artifact `hello-maven-jar` of this run |", summary)
+        self.assertIn("| 🏷️ Name | `lab/hellobx/b.jar` |", summary)   # what the caller named loses its markup
+        self.assertIn("| 📋 Type | `provenance` |", summary)
+
+        code, output, _, _ = self.run_step("collect", "🎯 Pin the subject", **{**pin, "EVD_IN_SHA256": "1" * 64})
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"holds a file with SHA-256 {sha256}", output)
+
+        (subject / "notes.txt").write_text("and something else")
+        code, output, _, _ = self.run_step("collect", "🎯 Pin the subject", **pin)
+        self.assertEqual(code, 1, output)
+        self.assertIn("must hold exactly one file, the artifact, not 2", output)
+
+    def test_provenance_needs_an_artifact_the_platform_downloaded(self):
+        pin = dict(EVD_IN_TYPE="provenance", EVD_IN_SHA256="1" * 64, EVD_IN_SUBJECT_ARTIFACT="", EVD_IN_SUBJECT="app")
+        code, output, _, _ = self.run_step("collect", "🎯 Pin the subject", **pin)
+        self.assertEqual(code, 1, output)
+        self.assertIn("provenance needs subject-artifact", output)
+        code, output, outputs, _ = self.run_step("collect", "🎯 Pin the subject", **{**pin, "EVD_IN_TYPE": "sca"})
+        self.assertEqual((code, outputs.get("sha256")), (0, "1" * 64), output)
+        code, output, _, _ = self.run_step("collect", "🎯 Pin the subject",
+                                           **{**pin, "EVD_IN_TYPE": "provenance-attestation"})
+        self.assertEqual(code, 1, output)
+        self.assertIn("provenance-attestation needs subject-artifact", output)
+
+    def test_each_call_collects_and_signs_one_type(self):
+        pin = dict(EVD_IN_SHA256="1" * 64, EVD_IN_SUBJECT_ARTIFACT="", EVD_IN_SUBJECT="app")
+        for given in ("sca,provenance", "sca provenance", "", "SCA"):
+            code, output, _, _ = self.run_step("collect", "🎯 Pin the subject", EVD_IN_TYPE=given, **pin)
+            self.assertEqual(code, 1, given)
+            self.assertIn("pass one evidence type id, and call evidence.yml once per type", output)
+        # Each call's artifacts carry its type, so the calls of one run never overwrite each other's.
+        self.assertIn("name: evidence-predicates-${{ inputs.type }}",
+                      self.step("collect", "📤 Hand the predicate to the sign job"))
+        self.assertIn("name: evidence-envelopes-${{ inputs.type }}", self.step("sign", "📤 Upload the signed envelope"))
+
+    def test_callers_call_evidence_once_per_type_and_verify_them_all(self):
+        for name in ("hello-maven", "hello-python", "hello-node", "demo"):
+            workflow = (self.WORKFLOWS / f"{name}.yml").read_text()
+            call = workflow.split("\n  evidence:\n", 1)[1].split("\n  verify:\n", 1)[0]
+            self.assertIn("fail-fast: false", call, name)
+            self.assertIn("type: ${{ matrix.type }}", call, name)
+            self.assertNotIn("types:", call, name)
+            # GitHub checks a called workflow's permissions before any job runs: attest's included.
+            self.assertIn("id-token: write\n      attestations: write", call, name)
+            self.assertIn("pattern: evidence-envelopes-*\n          merge-multiple: true", workflow, name)
+
+    def test_the_kit_is_the_commit_of_the_called_workflow_not_the_callers(self):
+        """From another repository, github.workflow_sha is the caller's commit: the kit would not be there."""
+        verify = self.WORKFLOWS / "verify.yml"
+        checkouts = [(self.WORKFLOW, "collect", "📥 Check out the kit"), (self.WORKFLOW, "sign", "📥 Check out the kit"),
+                     (verify, "verify", "📥 Check out the kit and the trusted public keys")]
+        for workflow, job, name in checkouts:
+            checkout = self.step(job, name, workflow)
+            self.assertIn("repository: ${{ job.workflow_repository }}\n          ref: ${{ job.workflow_sha }}\n"
+                          "          path: .evidence-kit\n          persist-credentials: false", checkout, job)
+        for workflow in (self.WORKFLOW, verify):
+            self.assertNotIn("ref: ${{ github.workflow_sha }}", workflow.read_text(), workflow.name)
+
+    def test_verify_checks_the_artifact_it_hashed_itself_with_the_kits_keys(self):
+        jobs = self.jobs(self.WORKFLOWS / "verify.yml")
+        self.assertEqual(sorted(jobs), ["verify"])
+        self.assertNotIn("id-token", jobs["verify"])
+        subject = self.runner_temp / "subject"
+        subject.mkdir()
+        (subject / "hello-python.tar.gz").write_bytes(b"bundle")
+        sha256 = hashlib.sha256(b"bundle").hexdigest()
+        step = dict(workflow=self.WORKFLOWS / "verify.yml", EVD_IN_SUBJECT_ARTIFACT="hello-python-bundle",
+                    EVD_IN_TYPES="provenance,provenance-attestation")
+        code, output, _, args = self.run_step("verify", "🛡️ Verify the artifact's evidence with the trusted public keys",
+                                              **step)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(args, [".evidence-kit/evidence/cli.py", "verify", "--envelopes", f"{self.runner_temp}/envelopes",
+                                "--keys", ".evidence-kit/trusted-keys", "--subject-sha256", sha256,
+                                "--types", "provenance,provenance-attestation"])
+        (subject / "notes.txt").write_text("and something else")
+        code, output, _, args = self.run_step("verify", "🛡️ Verify the artifact's evidence with the trusted public keys",
+                                              **step)
+        self.assertEqual((code, args), (1, None), output)
+        self.assertIn("must hold exactly one file, the artifact, not 2", output)
+
+    def test_no_workflow_starts_on_an_event_a_fork_can_cause(self):
+        """Every job here runs on the Talos runners, inside the homelab: in a public repository, a fork's pull
+        request must never start one. Only people who can push start these workflows."""
+        allowed = {"push", "workflow_dispatch", "workflow_call", "schedule"}
+        for workflow in sorted(self.WORKFLOWS.glob("*.yml")):
+            triggers = workflow.read_text().split("\non:\n", 1)[1].split("\n\n", 1)[0]
+            events = set(re.findall(r"(?m)^  ([a-z_]+):", triggers))
+            self.assertTrue(events, workflow.name)
+            self.assertLessEqual(events, allowed, workflow.name)
+
+    def test_each_type_installs_only_the_scanner_it_calls(self):
+        installer = self.runner_temp / ".evidence-kit" / "scripts" / "install-scanners.sh"
+        installer.parent.mkdir(parents=True)
+        # Records what it was asked for, and installs stand-ins that answer --version as the real ones do.
+        installer.write_text('#!/bin/sh\necho "$@" >>"$RUNNER_TEMP/installed"\nmkdir -p "$1"\n'
+                             'printf \'#!/bin/sh\\necho trufflehog 3.99.9\\n\' >"$1/trufflehog"\n'
+                             'printf \'#!/bin/sh\\necho "Application: grype"\\necho "Version: 0.121.0"\\n\' >"$1/grype"\n'
+                             'printf \'#!/bin/sh\\necho "gh version 2.102.0 (2026-09-30)"\\necho https://github.com\\n\' >"$1/gh"\n'
+                             'chmod 755 "$1"/*\n')
+        installer.chmod(0o755)
+        installed = self.runner_temp / "installed"
+        bin_dir = self.runner_temp / "scanners" / "bin"
+        summary = self.runner_temp / "step-summary"
+        for type_id, tool, role, shown in (("secret-detection", "trufflehog", "Scanner", "TruffleHog 3.99.9"),
+                                           ("sca", "grype", "Scanner", "Grype 0.121.0"),
+                                           ("provenance-attestation", "gh", "Verifier", "gh 2.102.0")):
+            installed.unlink(missing_ok=True)
+            summary.unlink(missing_ok=True)
+            code, output, _, _ = self.run_step("collect", "🧰 Install the tool the collector calls", EVD_IN_TYPE=type_id)
+            self.assertEqual(code, 0, output)
+            self.assertEqual(installed.read_text(), f"{bin_dir} {tool}\n")
+            self.assertIn(f"🧰 {shown}, its archive checked against its pinned SHA-256", output)
+            self.assertIn(f"🧰 **{role}** {shown}, its archive", summary.read_text())
+        for type_id in ("test-results", "provenance", "peer-approval", "custom"):
+            installed.unlink(missing_ok=True)
+            code, output, _, _ = self.run_step("collect", "🧰 Install the tool the collector calls", EVD_IN_TYPE=type_id)
+            self.assertEqual(code, 0, output)
+            self.assertFalse(installed.exists(), type_id)
+            self.assertIn(f"🧰 {type_id} calls no tool", output)
+
+    def test_the_collect_step_says_where_the_artifact_and_the_reports_are(self):
+        step = dict(EVD_IN_TYPE="sca", EVD_IN_PARAMS="", EVD_IN_SUBJECT_FILE="/work/subject/app.jar",
+                    EVD_IN_REPORTS="hello-maven-test-reports")
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **step)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(args[1:4], ["collect", "--types", "sca"])
+        self.assertIn("sca-target=file:/work/subject/app.jar", args)
+        self.assertFalse(any(arg.startswith("test-reports=") for arg in args))
+
+        # The caller may point sca at something else: the predicate records what was scanned.
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_PARAMS": "sca-target=dir:."})
+        self.assertEqual(code, 0, output)
+        self.assertIn("sca-target=dir:.", args)
+        self.assertNotIn("sca-target=file:/work/subject/app.jar", args)
+
+        step["EVD_IN_TYPE"] = "test-results"
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **step)
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"test-reports={self.runner_temp}/reports", args)
+        self.assertFalse(any(arg.startswith("sca-target=") for arg in args))
+        self.assertIn("if: inputs.reports-artifact != '' && inputs.type == 'test-results'",
+                      self.step("collect", "🧪 Download the build's test reports"))
+
+        # But never test-results at files of its choosing, such as a report committed to the repository.
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_PARAMS": "test-reports=fake"})
+        self.assertEqual((code, args), (1, None), output)
+        self.assertIn("test-reports is set by evidence.yml, not by the caller", output)
+
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_REPORTS": ""})
+        self.assertEqual((code, args), (1, None), output)
+        self.assertIn("test-results needs reports-artifact", output)
+
+        # GitHub's attestation must be of the file the platform downloaded, signed by the platform's workflow.
+        step["EVD_IN_TYPE"] = "provenance-attestation"
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **step)
+        self.assertEqual(code, 0, output)
+        self.assertIn("attested-file=/work/subject/app.jar", args)
+        self.assertIn("attestation-signer=Depthmark-Lab/test-evidences/.github/workflows/evidence.yml", args)
+        for param in ("attested-file=/tmp/other.jar", "attestation-signer=squad/repo/.github/workflows/own.yml"):
+            code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_PARAMS": param})
+            self.assertEqual((code, args), (1, None), output)
+            self.assertIn(f"{param.split('=')[0]} is set by evidence.yml, not by the caller", output)
+
     def test_the_installed_scanners_are_the_recorded_ones(self):
         script = (REPO_ROOT / "scripts" / "install-scanners.sh").read_text()
-        pinned = dict(re.findall(r'(?m)^(TRUFFLEHOG|GRYPE)_VERSION="([^"]+)"', script))
-        self.assertEqual({"trufflehog": pinned["TRUFFLEHOG"], "grype": pinned["GRYPE"]},
-                         {name: SCANNER_VERSIONS[name] for name in ("trufflehog", "grype")})
-        self.assertEqual(len(re.findall(r'(?m)^(?:TRUFFLEHOG|GRYPE)_SHA256="[0-9a-f]{64}"$', script)), 2)
+        pinned = dict(re.findall(r'(?m)^(TRUFFLEHOG|GRYPE|GH)_VERSION="([^"]+)"', script))
+        self.assertEqual({"trufflehog": pinned["TRUFFLEHOG"], "grype": pinned["GRYPE"], "gh": pinned["GH"]},
+                         {"trufflehog": SCANNER_VERSIONS["trufflehog"], "grype": SCANNER_VERSIONS["grype"],
+                          "gh": SCANNER_VERSIONS["gh"]["version"]})
+        self.assertEqual(len(re.findall(r'(?m)^(?:TRUFFLEHOG|GRYPE|GH)_SHA256="[0-9a-f]{64}"$', script)), 3)
+        # The recording verified the very archive install-scanners.sh pins.
+        self.assertIn(f'GH_SHA256="{SCANNER_VERSIONS["gh"]["sha256"]}"', script)
 
 
 if __name__ == "__main__":

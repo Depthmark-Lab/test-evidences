@@ -3,7 +3,7 @@
   "tier": "lab",
   "store": "file",
   "predicateBase": "https://github.com/Depthmark-Lab/test-evidences/tree/main/evidence/collectors",
-  "families": ["scan", "approval", "self"],
+  "families": ["scan", "approval", "self", "build"],
   "vault": {
     "addr": "https://vault.adelisle.com",
     "authPath": "github-actions",

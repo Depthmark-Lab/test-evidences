@@ -1,0 +1,21 @@
+{
+  "result": "pass",
+  "commit": "3affa072b1111a4e1e5a6f1ef063971449fdaf5b",
+  "format": "junit-xml",
+  "summary": {
+    "tests": 4,
+    "passed": 4,
+    "failed": 0,
+    "errored": 0,
+    "skipped": 0,
+    "flaky": 0
+  },
+  "reports": [
+    {
+      "file": "TEST-lab.hello.AppTest.xml",
+      "sha256": "c8a8e2e27d8952bb5379a7203de48adda02069ea5a91daac0342f80ca9f739e5",
+      "tests": 4
+    }
+  ],
+  "failedTests": []
+}

@@ -34,7 +34,8 @@ import collection  # noqa: E402
 import schema as schemas  # noqa: E402
 import signing  # noqa: E402
 import verification  # noqa: E402
-from core import EvidenceError, load_json  # noqa: E402
+from core import EvidenceError, load_json, predicate_type  # noqa: E402
+from display import announce, report, transit  # noqa: E402
 from version import __version__  # noqa: E402
 
 COLLECTORS = collection.COLLECTORS
@@ -48,10 +49,6 @@ def load_settings():
 
 def load_catalog():
     return load_json(ROOT / "catalog.json")
-
-
-def predicate_type(settings, type_id, version):
-    return f"{settings['predicateBase']}/{type_id}/{version}"
 
 
 # ---- run, collect and sign ----------------------------------------------------
@@ -109,7 +106,7 @@ def make_store(settings, args, vault):
     store(type_id, entry, predicate) signs one predicate and returns the key id.
     """
     def kind(type_id, entry):
-        return predicate_type(settings, type_id, entry["current"])
+        return predicate_type(settings, type_id, entry, entry["current"])
 
     if settings.get("store", "jfrog") == "file":
         out = Path(args.out)
@@ -142,7 +139,8 @@ def process(types, catalog, produce, status, finish):
         row = {"type": type_id, "version": entry["current"]}
         try:
             predicate = produce(type_id, entry)
-            row.update(status=status, result=predicate.get("result", "n/a"), detail=finish(type_id, entry, predicate))
+            row.update(status=status, result=predicate.get("result", "n/a"), detail=finish(type_id, entry, predicate),
+                       predicate=predicate)
         except EvidenceError as exc:
             # One type failing must not stop the others.
             row.update(status="error", result="n/a", detail=str(exc))
@@ -174,14 +172,26 @@ def cmd_run(args):
 
     vault = signing.Vault(settings)
     store, status, done_as = make_store(settings, args, vault)
+    print(vault.describe(), flush=True)
 
     def from_vault(entry):
         return lambda _name, spec: vault.read_secret(entry["family"], spec["path"], spec["field"])
 
     with tempfile.TemporaryDirectory(prefix="evidence-") as workdir:
         rows = process(types, catalog, collector(settings, params, from_vault, workdir), status, store)
-    report(rows, f"Evidence for `{args.subject_repo_path}`", "Signing key or error", done_as)
+    report(rows, signed_heading(status), status, done_as, "Signed by",
+           subject=(args.subject_repo_path, args.subject_sha256))
+    transit(vault.trail, vault.describe(), statement_names(settings, catalog, types))
     return outcome(rows, args.enforce)
+
+
+def signed_heading(status):
+    return "🔏 Evidence signed with Vault Transit" + (", attached in JFrog" if status == "attached" else "")
+
+
+def statement_names(settings, catalog, types):
+    """The (type, version) each requested type's statements carry, by predicate type: names for the signing trail."""
+    return {predicate_type(settings, t, catalog[t], catalog[t]["current"]): (t, catalog[t]["current"]) for t in types}
 
 
 def cmd_collect(args):
@@ -200,11 +210,12 @@ def cmd_collect(args):
     def write(type_id, _entry, predicate):
         path = out / f"{type_id}.json"
         write_json(path, predicate)
-        return str(path)
+        return path.name
 
     with tempfile.TemporaryDirectory(prefix="evidence-") as workdir:
         rows = process(types, catalog, collector(settings, params, from_environment, workdir), "collected", write)
-    report(rows, "Evidence collected, not signed", "File or error", "written to")
+    print(f"📁 Predicates go to {out}", flush=True)
+    report(rows, "🔎 Evidence collected, not signed yet", "collected", "written to", "Written to")
     return 1 if any(row["status"] == "error" for row in rows) else 0
 
 
@@ -235,8 +246,11 @@ def cmd_sign(args):
 
     vault = signing.Vault(settings)
     store, status, done_as = make_store(settings, args, vault)
+    print(vault.describe(), flush=True)
     rows = process(types, catalog, from_file, status, store)
-    report(rows, f"Evidence for `{args.subject_repo_path}`", "Signing key or error", done_as)
+    report(rows, signed_heading(status), status, done_as, "Signed by",
+           subject=(args.subject_repo_path, args.subject_sha256))
+    transit(vault.trail, vault.describe(), statement_names(settings, catalog, types))
     return outcome(rows, args.enforce)
 
 
@@ -245,7 +259,8 @@ def cmd_verify(args):
     if args.subject_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.subject_sha256):
         raise EvidenceError("subject-sha256 must be 64 lowercase hex characters")
     keys = verification.load_trusted_keys(args.keys)
-    files = sorted(Path(args.envelopes).glob("*.dsse.json"))
+    # Subfolders too: downloading a run's artifacts gives a folder per artifact, one per type.
+    files = sorted(Path(args.envelopes).rglob("*.dsse.json"))
     if not files:
         raise EvidenceError(f"no envelopes (*.dsse.json) in {args.envelopes}")
     expected = parse_types(args.types, catalog) if args.types else []
@@ -259,7 +274,7 @@ def cmd_verify(args):
             if type_id != row["type"]:
                 raise EvidenceError(f"the file is named for {row['type']} but holds {type_id} evidence")
             row.update(version=version, status="verified", result=statement["predicate"].get("result", "n/a"),
-                       detail=key_id)
+                       detail=key_id, predicate=statement["predicate"], statement=statement)
         except (EvidenceError, ValueError) as exc:
             row.update(status="error", detail=str(exc))
         rows.append(row)
@@ -267,7 +282,10 @@ def cmd_verify(args):
         if not any(row["type"] == type_id for row in rows):
             rows.append({"type": type_id, "version": "", "status": "error", "result": "n/a",
                          "detail": "no envelope for this type"})
-    report(rows, "Evidence verified with trusted public keys", "Signing key or error", "signed by")
+    subjects = [row["statement"]["subject"][0] for row in rows if row.get("statement")]
+    subject = (subjects[0]["name"], subjects[0]["digest"]["sha256"]) if subjects else None
+    report(rows, "🛡️ Evidence verified with trusted public keys", "verified", "signed by", "Signed by",
+           subject=subject, statements=True)
     return outcome(rows, args.enforce)
 
 
@@ -275,31 +293,6 @@ def write_json(path, value):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(value, handle, indent=2, sort_keys=True)
         handle.write("\n")
-
-
-def announce(level, message):
-    message = " ".join(str(message).split())
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print(f"::{level}::{message}", flush=True)
-    else:
-        print(f"{level}: {message}", file=sys.stderr, flush=True)
-
-
-def report(rows, heading, detail_heading, done_as):
-    for row in rows:
-        if row["status"] == "error":
-            announce("error", f"{row['type']}: {row['detail']}")
-        else:
-            print(f"{row['type']} {row['version']}: {row['status']}, result {row['result']}, {done_as} {row['detail']}",
-                  flush=True)
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        lines = [f"### {heading}", "",
-                 f"| Type | Version | Evidence | Result | {detail_heading} |", "|---|---|---|---|---|"]
-        lines += [f"| {r['type']} | {r['version']} | {r['status']} | {r['result']} | {str(r['detail']).replace('|', '/')} |"
-                  for r in rows]
-        with open(summary, "a", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
 
 
 # ---- list, check, lock -------------------------------------------------------
@@ -310,7 +303,7 @@ def cmd_list(_args):
     for type_id in sorted(catalog):
         entry = catalog[type_id]
         print(f"{type_id}  ({entry['family']} key, {entry['current']})  {entry.get('description', '')}")
-        print(f"    predicate type: {predicate_type(settings, type_id, entry['current'])}")
+        print(f"    predicate type: {predicate_type(settings, type_id, entry, entry['current'])}")
         for name, spec in entry.get("params", {}).items():
             need = "required" if spec.get("required") else "optional"
             print(f"    param {name} ({need}): {spec.get('description', '')}")
@@ -352,6 +345,7 @@ def find_problems():
     problems = []
     settings, catalog = load_settings(), load_catalog()
     lock = load_json(LOCK) if LOCK.exists() else {}
+    standard_types = {}
 
     for type_id, entry in sorted(catalog.items()):
         where = f"catalog '{type_id}'"
@@ -367,6 +361,15 @@ def find_problems():
         timeout = entry.get("timeout", collection.DEFAULT_TIMEOUT)
         if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
             problems.append(f"{where}: timeout must be a whole number of seconds")
+        for version, kind in entry.get("predicateTypes", {}).items():
+            if not (COLLECTORS / type_id / version).is_dir():
+                problems.append(f"{where}: predicateTypes names version '{version}', which has no collector folder")
+            if not re.fullmatch(r"https://\S+", str(kind)) or str(kind).startswith(settings["predicateBase"]):
+                problems.append(f"{where}: predicateTypes '{version}' must be another standard's https URL, "
+                                f"not '{kind}'")
+            if kind in standard_types:
+                problems.append(f"{where}: predicateTypes '{kind}' is already used by {standard_types[kind]}")
+            standard_types[kind] = f"{type_id}/{version}"
 
     for folder in sorted(COLLECTORS.glob("*/*")):
         if not folder.is_dir():
@@ -406,6 +409,7 @@ def find_problems():
     independent = [(path, "Evidence logic must not depend on Vault or JFrog; hand a predicate to cli.py instead")
                    for path in evidence_logic()]
     independent.append((ROOT / "verification.py", "A verifier needs public keys only, never Vault or JFrog"))
+    independent.append((ROOT / "display.py", "Showing evidence needs the predicate only, never Vault or JFrog"))
     for path, why in independent:
         where = path.relative_to(ROOT)
         try:
@@ -476,7 +480,7 @@ def main(argv=None):
     sign.set_defaults(handler=cmd_sign)
 
     verify = commands.add_parser("verify", help="check signed envelopes with trusted public keys only")
-    verify.add_argument("--envelopes", required=True, help="directory holding <type>.dsse.json files")
+    verify.add_argument("--envelopes", required=True, help="directory holding <type>.dsse.json files, in subdirectories or not")
     verify.add_argument("--keys", required=True, help="directory holding trusted <key id>.pub.pem files")
     verify.add_argument("--subject-sha256", default="", help="SHA-256 every envelope's subject must carry")
     verify.add_argument("--types", default="", help="comma-separated evidence type ids that must all be present")

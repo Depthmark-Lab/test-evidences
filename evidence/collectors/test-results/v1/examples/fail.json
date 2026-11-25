@@ -1,0 +1,39 @@
+{
+  "result": "fail",
+  "commit": "3affa072b1111a4e1e5a6f1ef063971449fdaf5b",
+  "format": "junit-xml",
+  "summary": {
+    "tests": 8,
+    "passed": 5,
+    "failed": 1,
+    "errored": 1,
+    "skipped": 1,
+    "flaky": 1
+  },
+  "reports": [
+    {
+      "file": "TEST-lab.hello.AppTest.xml",
+      "sha256": "250407e46f9a990d040a9fdc4f5d9d37de5a8b4f903c4d13c5303bd00424346e",
+      "tests": 4
+    },
+    {
+      "file": "TEST-lab.hello.BrokenTest.xml",
+      "sha256": "c043a071b3be83e56bb69e00dde254695922ebb9c81fe09b5119716ec061c67a",
+      "tests": 4
+    }
+  ],
+  "failedTests": [
+    {
+      "suite": "lab.hello.BrokenTest",
+      "test": "greetsInFrench",
+      "outcome": "failed",
+      "report": "TEST-lab.hello.BrokenTest.xml"
+    },
+    {
+      "suite": "lab.hello.BrokenTest",
+      "test": "throwsInsteadOfAsserting",
+      "outcome": "errored",
+      "report": "TEST-lab.hello.BrokenTest.xml"
+    }
+  ]
+}

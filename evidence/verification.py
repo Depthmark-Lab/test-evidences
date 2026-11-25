@@ -25,7 +25,7 @@ import re
 from pathlib import Path
 
 import schema as schemas
-from core import PAYLOAD_TYPE, STATEMENT_TYPE, EvidenceError, pae
+from core import PAYLOAD_TYPE, STATEMENT_TYPE, EvidenceError, evidence_type, pae
 
 KEY_ID = re.compile(r"evd-(?P<family>[a-z0-9]+)-(?P<tier>[a-z0-9]+)-v(?P<version>[0-9]+)")
 
@@ -174,11 +174,7 @@ def verify(envelope, keys, catalog, settings, sha256=""):
     if not isinstance(statement, dict) or statement.get("_type") != STATEMENT_TYPE:
         raise EvidenceError(f"the signed payload is not an in-toto statement ({STATEMENT_TYPE})")
 
-    base = settings["predicateBase"].rstrip("/") + "/"
-    kind = str(statement.get("predicateType", ""))
-    type_id, _, version = kind[len(base):].partition("/") if kind.startswith(base) else ("", "", "")
-    if type_id not in catalog or not re.fullmatch(r"v[0-9]+", version):
-        raise EvidenceError(f"unknown predicate type '{kind}'")
+    type_id, version = evidence_type(str(statement.get("predicateType", "")), catalog, settings)
 
     signer = KEY_ID.fullmatch(key_id)
     family = catalog[type_id]["family"]

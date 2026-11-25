@@ -1,0 +1,49 @@
+{
+  "result": "pass",
+  "commit": "fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd",
+  "artifact": {
+    "file": "gh_2.102.0_linux_amd64.tar.gz",
+    "sha256": "bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386"
+  },
+  "verifier": {
+    "name": "gh",
+    "version": "2.102.0"
+  },
+  "policy": {
+    "repository": "cli/cli",
+    "signerWorkflow": "cli/cli/.github/workflows/deployment.yml",
+    "sourceDigest": "fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd",
+    "predicateType": "https://slsa.dev/provenance/v1"
+  },
+  "summary": {
+    "verified": 1
+  },
+  "attestations": [
+    {
+      "signer": "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/trunk",
+      "buildConfig": "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/trunk",
+      "sourceRepository": "https://github.com/cli/cli",
+      "sourceRef": "refs/heads/trunk",
+      "sourceDigest": "fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd",
+      "trigger": "workflow_dispatch",
+      "runnerEnvironment": "github-hosted",
+      "runInvocation": "https://github.com/cli/cli/actions/runs/36659926055/attempts/1",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "certificateIssuer": "CN=sigstore-intermediate,O=sigstore.dev",
+      "builderId": "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/trunk",
+      "subjects": [
+        "gh_2.102.0_linux_amd64.tar.gz"
+      ],
+      "timestamps": [
+        {
+          "type": "Tlog",
+          "authority": "https://rekor.sigstore.dev",
+          "time": "2026-09-29T22:38:20-04:00"
+        }
+      ],
+      "transparencyLogIndexes": [
+        3010358693
+      ]
+    }
+  ]
+}

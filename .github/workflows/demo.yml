@@ -1,8 +1,10 @@
 # Demo of the whole chain on the Talos runners, as a squad and a consumer would see it:
 #   build     builds a sample application with leaked secrets and vulnerable
 #             dependencies, and packages it: the artifact the evidence is about
-#   evidence  collects evidence about it, then signs it with Vault Transit
+#   evidence  collects evidence about it, then signs it with Vault Transit, in one
+#             call of evidence.yml per type
 #   verify    checks every envelope with the trusted public keys only
+# Each job adds what it did to the run's summary page.
 name: demo
 
 on:
@@ -29,30 +31,55 @@ jobs:
       contents: read
     outputs:
       sha256: ${{ steps.package.outputs.sha256 }}
+      types: ${{ steps.types.outputs.json }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 📥 Check out the sample's generator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Build the sample application
+      # A matrix needs a JSON list, and expressions cannot split the comma-separated input.
+      - name: 📋 List the types, one evidence call each
+        id: types
+        env:
+          EVD_IN_TYPES: ${{ inputs.types }}
+        run: |
+          json=$(python3 -c 'import json, os; print(json.dumps(list(dict.fromkeys(
+              t.strip() for t in os.environ["EVD_IN_TYPES"].split(",") if t.strip()))))')
+          echo "json=$json" >>"$GITHUB_OUTPUT"
+          echo "📋 One call of evidence.yml per type: $json"
+
+      - name: 🔨 Build the sample application
         run: |
           python3 tests/scanners/sample.py "$RUNNER_TEMP/sample-app"
           cp demo/predicate.json "$RUNNER_TEMP/sample-app/"
 
-      - name: Package it
+      - name: 📦 Package it
         id: package
         run: |
           tar -C "$RUNNER_TEMP" --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
             -czf "$RUNNER_TEMP/sample-app.tar.gz" sample-app
-          echo "sha256=$(sha256sum "$RUNNER_TEMP/sample-app.tar.gz" | cut -d' ' -f1)" >>"$GITHUB_OUTPUT"
+          sha256=$(sha256sum "$RUNNER_TEMP/sample-app.tar.gz" | cut -d' ' -f1)
+          echo "sha256=$sha256" >>"$GITHUB_OUTPUT"
+          echo "📦 sample-app.tar.gz, sha256:$sha256"
+          {
+            echo "### 🏗️ The demo's sample application"
+            echo
+            echo "Built to fail on purpose: two leaked secrets, random and working nowhere, and dependencies"
+            echo "with published vulnerabilities. Expect 🔴 for \`secret-detection\` and \`sca\`."
+            echo
+            echo "📦 \`sample-app.tar.gz\` · SHA-256 \`$sha256\`"
+          } >>"$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - name: 📤 Hand the package over
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sample-app
           path: ${{ runner.temp }}/sample-app.tar.gz
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - name: 📤 Hand the files to scan over
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sample-app-source
           path: ${{ runner.temp }}/sample-app
@@ -61,18 +88,27 @@ jobs:
 
   evidence:
     needs: build
+    # One call per evidence type: each gets its own runners, log and summary,
+    # and a type that fails stops no other.
+    strategy:
+      fail-fast: false
+      matrix:
+        type: ${{ fromJSON(needs.build.outputs.types) }}
     uses: ./.github/workflows/evidence.yml
+    # attestations: write for evidence.yml's attest job, which provenance-attestation runs. GitHub
+    # checks a called workflow's permissions before any job runs, so every caller grants it.
     permissions:
       contents: read
       pull-requests: read
       id-token: write
+      attestations: write
     with:
-      types: ${{ inputs.types }}
+      type: ${{ matrix.type }}
       subject-repo-path: lab-artifacts/sample-app/${{ github.run_number }}/sample-app.tar.gz
       subject-sha256: ${{ needs.build.outputs.sha256 }}
       source-artifact: sample-app-source
-      # predicate-file only when custom is requested: a parameter no requested type uses is refused.
-      params: ${{ contains(format(',{0},', inputs.types), ',custom,') && 'predicate-file=predicate.json' || '' }}
+      # A parameter the type does not use is refused, so only custom gets predicate-file.
+      params: ${{ matrix.type == 'custom' && 'predicate-file=predicate.json' || '' }}
       enforce: ${{ inputs.enforce }}
 
   verify:
@@ -83,16 +119,20 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 📥 Check out the kit and the trusted public keys
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: 📥 Download the signed envelopes, one artifact per type
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: evidence-envelopes
+          pattern: evidence-envelopes-*
+          merge-multiple: true
           path: ${{ runner.temp }}/envelopes
 
-      - name: Verify with the trusted public keys
+      # Prints each verified statement in a log group, and adds them to the summary, folded.
+      - name: 🛡️ Verify with the trusted public keys
         env:
           EVD_IN_TYPES: ${{ inputs.types }}
           EVD_IN_SHA256: ${{ needs.build.outputs.sha256 }}

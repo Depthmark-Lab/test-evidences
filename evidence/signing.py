@@ -11,17 +11,52 @@ and attaches the signed envelope to the artifact, "file" builds the same
 statement here and returns the signed envelope for the caller to write. Either
 way the private key never leaves Vault Transit.
 
+Every step with Vault goes to the job's log as it happens: the claims of the
+identity token Vault checks, the login, the key, the bytes signed and Vault's
+request id for each call, which its audit log also records. Vault keeps the same
+facts in its trail, for cli.py to add to the step summary.
+
 Standard library only, so nothing is installed at run time in the signing path.
-Tokens stay in memory. They are never written to disk or to the job environment.
+Tokens stay in memory. They are never written to disk or to the job environment,
+and never printed: they are masked, and only the token's claims are shown.
 """
 from __future__ import annotations
 
 import base64
+import binascii
+import hashlib
 import json
 import os
+import time
 import urllib.parse
 
 from core import PAYLOAD_TYPE, STATEMENT_TYPE, EvidenceError, http_json, mask, pae
+
+ALGORITHMS = {"pkcs1v15": "RSA PKCS#1 v1.5", "pss": "RSA-PSS"}
+# The claims of the identity token that Vault's evidence roles bind or record, in the order the log shows them.
+CLAIMS = ("aud", "job_workflow_ref", "runner_environment", "repository", "repository_owner_id", "ref", "sha",
+          "run_id", "run_attempt")
+
+
+def say(line):
+    """A line in the job's log, as the step happens."""
+    print(line, flush=True)
+
+
+def claims(token):
+    """A JWT's claims, read without checking its signature: Vault checks it. Empty for any other token."""
+    try:
+        part = token.split(".")[1]
+        value = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+    except (IndexError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def lasting(seconds):
+    if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds <= 0:
+        return "an unknown time"
+    return f"{seconds // 60}m" if seconds % 60 == 0 else f"{seconds}s"
 
 
 def id_token(settings, target):
@@ -39,9 +74,11 @@ def id_token(settings, target):
             raise EvidenceError(f"identity is 'file' but {variable} is not set")
         try:
             with open(path, encoding="utf-8") as handle:
-                return handle.read().strip()
+                token = handle.read().strip()
         except OSError as exc:
             raise EvidenceError(f"cannot read {variable}: {exc}") from None
+        mask(token)
+        return token
     if source != "github":
         raise EvidenceError(f"unknown identity source '{source}'")
 
@@ -58,17 +95,41 @@ def id_token(settings, target):
     )
     if not reply.get("value"):
         raise EvidenceError("the GitHub OIDC endpoint returned no token")
+    mask(reply["value"])
     return reply["value"]
 
 
 class Vault:
-    """Vault Enterprise: one login per key family, Transit signing, KV reads."""
+    """Vault Enterprise: one login per key family, Transit signing, KV reads.
+
+    trail holds one dict per login and per signature, in order: what the log said, for the step summary.
+    """
 
     def __init__(self, settings):
         self.settings = settings
         self.conf = settings["vault"]
         self.tier = settings["tier"]
         self._tokens = {}
+        self.trail = []
+
+    def describe(self):
+        """One line naming the Vault, its mounts and the signature algorithm."""
+        algorithm = self.conf.get("signatureAlgorithm", "pkcs1v15")
+        namespace = f", namespace {self.conf['namespace']}" if self.conf.get("namespace") else ""
+        return (f"🏦 Vault {self.conf['addr']}{namespace}: login at auth/{self.conf['authPath']}, "
+                f"Transit at {self.conf['transitMount']}, {ALGORITHMS.get(algorithm, algorithm)} with SHA-256")
+
+    def _call(self, step, path, body, token=None):
+        """POST to Vault for one step of the trail, and record Vault's request id and the time it took, or its refusal."""
+        started = time.monotonic()
+        try:
+            reply = http_json("POST", f"{self.conf['addr']}/v1/{path}", body, self._headers(token))
+        except EvidenceError as exc:
+            step["error"] = str(exc)
+            say(f"⛔ {exc}")
+            raise
+        step.update(request=str(reply.get("request_id") or "none"), ms=round((time.monotonic() - started) * 1000))
+        return reply
 
     def _headers(self, token=None):
         headers = {}
@@ -83,16 +144,36 @@ class Vault:
 
     def login(self, family):
         if family not in self._tokens:
-            reply = http_json(
-                "POST",
-                f"{self.conf['addr']}/v1/auth/{self.conf['authPath']}/login",
-                {"jwt": id_token(self.settings, "vault"), "role": f"evidence-{family}-{self.tier}"},
-                self._headers(),
-            )
-            token = (reply.get("auth") or {}).get("client_token")
+            role = f"evidence-{family}-{self.tier}"
+            jwt = id_token(self.settings, "vault")
+            read = claims(jwt)
+            step = {"step": "login", "role": role, "claims": {name: str(read[name]) for name in CLAIMS if name in read}}
+            self.trail.append(step)
+            source = ("the file in EVD_VAULT_JWT_FILE" if self.settings.get("identity", "github") == "file"
+                      else "GitHub's OIDC endpoint")
+            if step["claims"]:
+                until = (f", valid until {time.strftime('%H:%M:%S UTC', time.gmtime(read['exp']))}"
+                         if isinstance(read.get("exp"), int) else "")
+                say(f"🪪 Identity token from {source}{until}. Vault checks these claims against role {role}:")
+                width = max(map(len, step["claims"]))
+                for name, value in step["claims"].items():
+                    say(f"     {name:<{width}}  {value}")
+            else:
+                say(f"🪪 Identity token from {source}: not a JWT, so its claims are not shown. "
+                    f"Vault checks it against role {role}")
+
+            reply = self._call(step, f"auth/{self.conf['authPath']}/login", {"jwt": jwt, "role": role})
+            auth = reply.get("auth") or {}
+            token = auth.get("client_token")
             if not token:
-                raise EvidenceError("Vault login returned no token")
+                step["error"] = "Vault login returned no token"
+                raise EvidenceError(step["error"])
             mask(token)
+            step.update(tokenType=str(auth.get("token_type") or "a"), valid=lasting(auth.get("lease_duration")),
+                        policies=[str(p) for p in auth.get("token_policies") or auth.get("policies") or []])
+            say(f"🔐 Vault login with role {role}: {step['tokenType']} token, valid {step['valid']}, "
+                f"policies {', '.join(step['policies']) or 'none'}. Request {step['request']}, {step['ms']} ms. "
+                "The token is masked, never printed")
             self._tokens[family] = token
         return self._tokens[family]
 
@@ -103,13 +184,15 @@ class Vault:
         if not value:
             raise EvidenceError(f"no field '{field}' in Vault secret {path}")
         mask(value)
+        say(f"🔑 Vault secret {path}, field {field}: read with the {family} family's token, masked, never printed")
         return value
 
-    def sign(self, family, data):
+    def sign(self, family, data, about=""):
         """Sign bytes with the family's Transit key. Returns (key id, base64 signature).
 
         The key id is <key name>-v<Transit key version>, which is also the alias of
         the public key in JFrog. For PSS it carries the ';PS256' suffix JFrog expects.
+        about is the predicate type of the statement the bytes encode, for the trail.
         """
         algorithm = self.conf.get("signatureAlgorithm", "pkcs1v15")
         body = {
@@ -120,18 +203,28 @@ class Vault:
         if algorithm == "pss":
             body["salt_length"] = "hash"
         key = self.key_name(family)
-        reply = http_json(
-            "POST",
-            f"{self.conf['addr']}/v1/{self.conf['transitMount']}/sign/{key}",
-            body,
-            self._headers(self.login(family)),
-        )
+        token = self.login(family)
+        step = {"step": "sign", "about": about, "key": key, "algorithm": ALGORITHMS.get(algorithm, algorithm),
+                "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        self.trail.append(step)
+        say(f"✍️ Transit sign with {key}: {step['algorithm']} over the SHA-256 of {len(data):,} bytes, "
+            f"the statement's DSSE encoding. Their SHA-256: {step['sha256']}")
+
+        reply = self._call(step, f"{self.conf['transitMount']}/sign/{key}", body, token)
         parts = str((reply.get("data") or {}).get("signature", "")).split(":")
         if len(parts) != 3 or parts[0] != "vault" or not parts[1].startswith("v") or not parts[2]:
-            raise EvidenceError("unexpected signature format from Vault")
+            step["error"] = "unexpected signature format from Vault"
+            raise EvidenceError(step["error"])
         key_id = f"{key}-{parts[1]}"
         if algorithm == "pss":
             key_id += ";PS256"
+        try:
+            size = f"a {len(base64.b64decode(parts[2], validate=True))}-byte signature"
+        except binascii.Error:
+            size = "a signature that is not base64"
+        step.update(version=parts[1][1:], keyId=key_id)
+        say(f"✅ Vault signed with {key} version {step['version']}, key id {key_id}: {size}. "
+            f"Request {step['request']}, {step['ms']} ms. The private key never left Vault")
         return key_id, parts[2]
 
 
@@ -200,8 +293,9 @@ def publish(predicate, predicate_type, family, repo_path, sha256, vault, jfrog):
     prepared = jfrog.prepare(repo_path, sha256, predicate_type, predicate)
     payload = base64.b64decode(prepared["dsse_payload"])
     check_statement(payload, predicate_type, predicate, sha256)
+    say(f"📜 JFrog prepared the in-toto statement about {repo_path}, {predicate_type}: it carries what was collected")
 
-    key_id, signature = vault.sign(family, pae(prepared["dsse_payload_type"], payload))
+    key_id, signature = vault.sign(family, pae(prepared["dsse_payload_type"], payload), about=predicate_type)
     result = jfrog.deploy(prepared["post_url"], {
         "payload": prepared["dsse_payload"],
         "payloadType": prepared["dsse_payload_type"],
@@ -225,7 +319,8 @@ def envelope(predicate, predicate_type, family, repo_path, sha256, vault):
         "predicate": predicate,
     }
     payload = json.dumps(statement, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    key_id, signature = vault.sign(family, pae(PAYLOAD_TYPE, payload))
+    say(f"📜 In-toto statement about {repo_path}, SHA-256 {sha256}: {predicate_type}, {len(payload):,} bytes")
+    key_id, signature = vault.sign(family, pae(PAYLOAD_TYPE, payload), about=predicate_type)
     return key_id, {
         "payload": base64.b64encode(payload).decode(),
         "payloadType": PAYLOAD_TYPE,

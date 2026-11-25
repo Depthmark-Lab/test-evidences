@@ -29,12 +29,39 @@
   "sca": {
     "description": "Known vulnerabilities in the dependencies of this commit, found by Grype",
     "family": "scan",
-    "current": "v1",
+    "current": "v2",
     "timeout": 900,
     "env": ["GRYPE_DB_CACHE_DIR"],
     "params": {
-      "sca-target": {"required": false, "description": "dir:<path> or sbom:<file> to scan (default dir:.)"},
+      "sca-target": {"required": false, "description": "dir:<path>, sbom:<file> or file:<file> to scan (default dir:.). evidence.yml sets file: to the subject when given subject-artifact"},
       "sca-fail-on": {"required": false, "description": "Lowest severity that makes the result fail: critical, high, medium, low or negligible (default high)"}
+    }
+  },
+  "test-results": {
+    "description": "What the tests of the build reported, read from its JUnit XML. Signed with the build key: the squad's build ran them",
+    "family": "build",
+    "current": "v1",
+    "params": {
+      "test-reports": {"required": true, "description": "Directory of JUnit XML reports. evidence.yml sets it when given reports-artifact"}
+    }
+  },
+  "provenance": {
+    "description": "SLSA build provenance: which workflow, commit and run produced the artifact",
+    "family": "build",
+    "current": "v1",
+    "predicateTypes": {"v1": "https://slsa.dev/provenance/v1"},
+    "env": ["GITHUB_WORKFLOW_REF", "GITHUB_REF", "GITHUB_EVENT_NAME", "GITHUB_REPOSITORY_ID",
+            "GITHUB_REPOSITORY_OWNER_ID", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "RUNNER_ENVIRONMENT"]
+  },
+  "provenance-attestation": {
+    "description": "GitHub's artifact attestation of the artifact's build provenance, signed with Sigstore, as gh verified it. evidence.yml has GitHub make it first",
+    "family": "build",
+    "current": "v1",
+    "timeout": 300,
+    "env": ["GH_TOKEN"],
+    "params": {
+      "attested-file": {"required": true, "description": "The artifact. evidence.yml sets it to the subject it downloaded and hashed"},
+      "attestation-signer": {"required": true, "description": "<owner>/<repo>/.github/workflows/<file> that must have signed the attestation. evidence.yml sets it to itself"}
     }
   },
   "custom": {

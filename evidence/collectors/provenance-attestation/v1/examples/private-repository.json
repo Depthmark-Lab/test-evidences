@@ -1,0 +1,23 @@
+{
+  "result": "fail",
+  "commit": "932e974ab1737b2e942bdc485a6676c6269c6054",
+  "artifact": {
+    "file": "hello-maven.jar",
+    "sha256": "8452b6ac1562ed00e3a19691b38abe382ce5443689e57c8eb4f25dac47082c4a"
+  },
+  "verifier": {
+    "name": "gh",
+    "version": "2.102.0"
+  },
+  "policy": {
+    "repository": "Depthmark-Lab/test-evidences",
+    "signerWorkflow": "Depthmark-Lab/test-evidences/.github/workflows/evidence.yml",
+    "sourceDigest": "932e974ab1737b2e942bdc485a6676c6269c6054",
+    "predicateType": "https://slsa.dev/provenance/v1"
+  },
+  "summary": {
+    "verified": 0
+  },
+  "attestations": [],
+  "reason": "GitHub holds no provenance attestation for these bytes: HTTP 404: Not Found (https://api.github.com/repos/Depthmark-Lab/test-evidences/attestations/sha256:8452b6ac1562ed00e3a19691b38abe382ce5443689e57c8eb4f25dac47082c4a?per_page=30&predicate_type=https%3A%2F%2Fslsa.dev%2Fprovenance%2Fv1)"
+}

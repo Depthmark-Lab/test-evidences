@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "provenance-attestation v1",
+  "description": "GitHub's artifact attestation of an artifact's build provenance (SLSA v1, signed with Sigstore), as gh verified it: who signed it, for which source and run, and where it was logged. Never the bundles themselves",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["result", "commit", "artifact", "verifier", "policy", "summary", "attestations"],
+  "properties": {
+    "result": {"enum": ["pass", "fail"], "description": "pass when at least one of GitHub's attestations for these bytes verifies under the policy, fail when GitHub holds none"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256"],
+      "properties": {
+        "file": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"const": "gh"},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "description": "What gh attestation verify enforced, besides the signature, the certificate chain and the log or timestamp",
+      "additionalProperties": false,
+      "required": ["repository", "signerWorkflow", "sourceDigest", "predicateType"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+        "signerWorkflow": {"type": "string", "pattern": "^[^/]+/[^/]+/\\.github/workflows/[^/]+\\.ya?ml$"},
+        "sourceDigest": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "predicateType": {"const": "https://slsa.dev/provenance/v1"}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verified"],
+      "properties": {
+        "verified": {"type": "integer"}
+      }
+    },
+    "reason": {"type": "string", "minLength": 1, "description": "Why the result is fail"},
+    "attestations": {
+      "type": "array",
+      "description": "Each attestation that verified, as its certificate and statement describe it",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["signer", "buildConfig", "sourceRepository", "sourceRef", "sourceDigest", "trigger",
+                     "runnerEnvironment", "runInvocation", "issuer", "certificateIssuer", "builderId", "subjects",
+                     "timestamps", "transparencyLogIndexes"],
+        "properties": {
+          "signer": {"type": "string", "pattern": "^https://", "description": "The workflow whose job asked for the attestation, at its ref"},
+          "buildConfig": {"type": "string", "description": "The workflow the run started from: the squad's"},
+          "sourceRepository": {"type": "string"},
+          "sourceRef": {"type": "string"},
+          "sourceDigest": {"type": "string"},
+          "trigger": {"type": "string"},
+          "runnerEnvironment": {"type": "string"},
+          "runInvocation": {"type": "string"},
+          "issuer": {"type": "string"},
+          "certificateIssuer": {"type": "string"},
+          "builderId": {"type": "string"},
+          "subjects": {"type": "array", "items": {"type": "string"}, "description": "The names the statement gives these bytes"},
+          "timestamps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["type", "authority", "time"],
+              "properties": {
+                "type": {"type": "string", "description": "Tlog for a transparency log, TimestampAuthority for a signed timestamp"},
+                "authority": {"type": "string"},
+                "time": {"type": "string"}
+              }
+            }
+          },
+          "transparencyLogIndexes": {"type": "array", "items": {"type": "integer"}}
+        }
+      }
+    }
+  }
+}
