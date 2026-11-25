@@ -1,0 +1,99 @@
+# The one workflow that may read a repository's controls.
+#
+# github-sts grants the test-controls-read-app token (administration,
+# environments, members and metadata, read only) to this file alone: the trust
+# policy .github/sts/test-controls-read-app/repository-snapshot.sts.yaml
+# matches the job_workflow_ref of this workflow's job, which is this file
+# whichever workflow calls it. Its job runs the kit's
+# scripts/snapshot-repository.py and nothing else, the script revokes the token
+# once the snapshot is taken, and only the snapshot leaves the job: uploaded as
+# an artifact, whose id the caller gets as the output snapshot-id.
+#
+# Callers: repository-controls.yml every day, with check set to compare the
+# live controls with the committed ones, and evidence.yml for the
+# repository-controls evidence type. docs/repository-snapshot.md describes it all.
+name: repository-snapshot
+
+on:
+  workflow_call:
+    inputs:
+      check:
+        description: Path of a committed snapshot in the caller's repository. When it exists, the job fails if the live controls differ from it
+        required: false
+        type: string
+        default: ""
+      artifact-name:
+        description: Name of the artifact the snapshot is uploaded as
+        required: false
+        type: string
+        default: repository-controls
+      runs-on:
+        description: Runner labels, as a JSON list
+        required: false
+        type: string
+        default: '["self-hosted", "talos", "lab"]'
+    outputs:
+      snapshot-id:
+        description: Artifact id of the snapshot, to download it by id rather than by name
+        value: ${{ jobs.snapshot.outputs.snapshot-id }}
+
+permissions: {}
+
+jobs:
+  snapshot:
+    name: 📸 Snapshot the repository's controls
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      snapshot-id: ${{ steps.hand-off.outputs.artifact-id }}
+    steps:
+      - name: 📥 Check out the kit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Depthmark-Lab/test-evidences
+          ref: ${{ github.workflow_sha }}
+          path: .evidence-kit
+          persist-credentials: false
+
+      - name: 📥 Check out the declared controls
+        if: inputs.check != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: declared
+          persist-credentials: false
+
+      - name: 📸 Snapshot the repository's controls
+        env:
+          EVD_IN_CHECK: ${{ inputs.check }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/controls"
+          args=(--repo "$GITHUB_REPOSITORY" --sts-url https://github-sts-dev.adelisle.com
+                --sts-app test-controls-read-app --sts-identity repository-snapshot
+                --out "$RUNNER_TEMP/controls/repository-controls.json")
+          if [ -n "$EVD_IN_CHECK" ]; then
+            if ! [[ $EVD_IN_CHECK =~ ^[A-Za-z0-9._/-]+$ ]] || [[ $EVD_IN_CHECK == *..* ]]; then
+              echo "::error::check must be a relative path inside the repository: letters, digits, . _ / and -"
+              exit 1
+            fi
+            if [ -f "declared/$EVD_IN_CHECK" ]; then
+              args+=(--check "declared/$EVD_IN_CHECK")
+            else
+              echo "::notice title=📸 No declared controls yet::Review the uploaded snapshot and commit it as $EVD_IN_CHECK"
+            fi
+          fi
+          python3 .evidence-kit/scripts/snapshot-repository.py "${args[@]}"
+
+      # Also when the controls differ: the live snapshot is what to commit if the change was intended.
+      - name: 📤 Upload the snapshot
+        id: hand-off
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ runner.temp }}/controls
+          if-no-files-found: ignore
+          overwrite: true

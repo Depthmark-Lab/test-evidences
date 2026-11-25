@@ -1,0 +1,28 @@
+# The token the dev broker (github-sts-dev.adelisle.com), pool
+# test-controls-read-app, gives to repository-snapshot.yml and nothing else, to
+# snapshot this repository's controls and who has access. Read only, for this
+# repository only, on a self-hosted runner.
+#
+# job_workflow_ref names the workflow file that defines the job, so this
+# matches repository-snapshot.yml whichever workflow calls it: the daily
+# repository-controls.yml, and evidence.yml for the repository-controls evidence
+# type. Like Vault's evidence roles, it also accepts feature/build-evidence while
+# that branch is tested; drop it once merged. The broker reads this file from
+# the default branch: it takes effect once it is on main.
+issuer: https://token.actions.githubusercontent.com
+claim_pattern:
+  job_workflow_ref: '^Depthmark-Lab/test-evidences/\.github/workflows/repository-snapshot\.yml@refs/heads/(main|feature/build-evidence)$'
+  runner_environment: '^self-hosted$'
+audience: github-sts
+github:
+  sources:
+    - owner_id: "71595780"
+      repository_id: "1460010558"
+  target:
+    owner_id: "71595780"
+    repository_id: "1460010558"
+permissions:
+  administration: read
+  environments: read
+  members: read
+  metadata: read
