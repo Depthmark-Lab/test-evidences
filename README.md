@@ -19,7 +19,7 @@ demo.yml  build ──► evidence.yml ─────────────�
 ```
 
 - Callers call `evidence.yml` once per evidence type, from a matrix. Each type gets its own collect and sign jobs, its own log and summary, and installs only the scanner it calls; a type that fails stops no other. Its envelope is the artifact `evidence-envelopes-<type>`, and `verify` downloads them all with the pattern `evidence-envelopes-*`.
-- The collect job cannot request an OIDC token, so nothing a scanner runs can log in to Vault. For `provenance-attestation` only, an `attest` job runs first: it holds a token for GitHub's Sigstore and runs GitHub's attest action, nothing else.
+- The collect job cannot request an OIDC token, so nothing a scanner runs can log in to Vault. For `provenance-attestation` only, an `attest` job runs first: it holds a token for GitHub's Sigstore and runs GitHub's attest action, nothing else. For `repository-controls` only, a `read-controls` job runs first: it calls `repository-snapshot.yml`, the one workflow github-sts gives a token to read a repository's controls, and hands collect the snapshot.
 - Vault trusts only `evidence.yml` on the allowed branches, on a self-hosted runner. Each key family has its own role and may sign with its own key only.
 - `verify` refuses a key from the wrong family, so a squad's self-declared `custom` evidence can never pass for a scan.
 
@@ -45,6 +45,7 @@ hello-<lang>.yml  build ────────────► evidence.yml ─
 | `test-results` | the squad's build, read from its JUnit XML | `evd-build-lab` | this run's build reported these results |
 | `provenance` | GitHub, through the variables it sets for the run | `evd-build-lab` | this run of this workflow, at this commit, produced these bytes |
 | `provenance-attestation` | GitHub: its artifact attestation, SLSA provenance signed with Sigstore, which `gh attestation verify` checked | `evd-build-lab` | GitHub's own attestation of these bytes holds, signed by `evidence.yml` at this commit |
+| `repository-controls` | the platform: the repository's settings, branch rules and access, read with a read-only github-sts token | `evd-scan-lab` | these controls protected the branch, and these people had access, when these bytes were released |
 
 - **Attestation.** Each envelope is one: an in-toto statement about the artifact's SHA-256, signed in DSSE by a key only `evidence.yml` can use. The squad's own workflow cannot get a token for any key.
 - **Provenance** is SLSA build provenance v1 (`https://slsa.dev/provenance/v1`) with GitHub's own build type, so SLSA tools can read it. `builder.id` is the squad's workflow; the build key's signature says the platform vouches for it.
@@ -59,6 +60,9 @@ hello-<lang>.yml  build ────────────► evidence.yml ─
 .github/workflows/evidence.yml   reusable workflow, the trust boundary: collect, then sign
 .github/workflows/demo.yml       builds a sample app, runs evidence.yml on it, verifies the result
 .github/workflows/hello-*.yml    a squad's own CI for each sample service: build, evidence.yml, verify
+.github/workflows/repository-snapshot.yml   reusable: the one workflow with a token to read a repository's controls
+.github/workflows/repository-controls.yml   calls it every day, and checks the controls against the committed snapshot
+docs/repository-snapshot.md      the repository snapshot: what it reads, its token, and how to call it
 .github/workflows/ci.yml         check and tests on every push
 evidence/
   settings.json                  lab: homelab Vault, tier lab, store file
@@ -73,10 +77,11 @@ evidence/
   collectors/<type>/<version>/   collect.py, schema.json, examples/
 scripts/install-scanners.sh      TruffleHog, Grype and gh, pinned by version and SHA-256, or only the one named
 scripts/show-envelopes.py        prints what envelopes say: key id, subject, predicate
+scripts/snapshot-repository.py   a repository's controls and who has access, as JSON to commit and --check
 samples/hello-{maven,python,node} Hello World web services with unit tests, as squads would write them
 trusted-keys/                    public keys from Transit, one per key version
 demo/predicate.json              what the demo declares through the custom type
-tests/                           88 tests against stand-in services, recorded scanner output and recorded JUnit XML
+tests/                           100 tests against stand-in services, recorded scanner output and recorded JUnit XML
 action.yml, Dockerfile           the one-job and container forms of the kit
 ```
 
@@ -112,7 +117,7 @@ Run the `demo` workflow from the Actions tab, or `gh workflow run demo.yml --ref
 
 `fail` is recorded and signed; it fails the run only with `enforce`. Each type's envelope is in the run's `evidence-envelopes-<type>` artifact.
 
-The sample squads run on their own: `hello-maven`, `hello-python` and `hello-node` start on a push that changes their sample or their workflow, and from the Actions tab once they are on `main`. Each produces five envelopes about its deployable:
+The sample squads run on their own: `hello-maven`, `hello-python` and `hello-node` start on a push that changes their sample or their workflow, and from the Actions tab once they are on `main`. Each produces six envelopes about its deployable:
 
 | Type | Signed with | Expected result |
 |---|---|---|
@@ -121,6 +126,7 @@ The sample squads run on their own: `hello-maven`, `hello-python` and `hello-nod
 | `test-results` | `evd-build-lab` | `pass`: 4 Surefire tests, 3 pytest tests, 3 Node tests |
 | `provenance` | `evd-build-lab` | no result: SLSA provenance naming the workflow, commit and run |
 | `provenance-attestation` | `evd-build-lab` | `pass` where GitHub keeps attestations. Here, none: the `attest` job fails, see above |
+| `repository-controls` | `evd-scan-lab` | `fail` here: GitHub shows no branch rules on a private repository on the Free plan, so seven of the nine checks are unknown, and workflows may approve pull requests |
 
 To check envelopes yourself (`verify` reads the folder `gh` makes for each artifact):
 
@@ -153,13 +159,17 @@ When Vault refuses, a `⛔` line gives its answer, such as `claim "job_workflow_
 
 ## What was tested
 
-- The 88 tests: the kit against stand-in GitHub, Vault, JFrog and SonarQube, scanners and gh replaying recorded output, JUnit XML that Surefire, pytest and Node wrote for the samples (passing, failing, erroring, skipped and flaky), both stores, the collect and sign split, verification against openssl, the step summaries (one line of facts per type, and Markdown escaped where squads wrote the text), the sign log's steps with Vault and a refused login, GitHub's attestation verified, absent or not verifying, and `evidence.yml`: its shape, one type per call, the attest job, and its subject, scanner and parameter steps run with bash.
+- The 100 tests: the kit against stand-in GitHub, github-sts, Vault, JFrog and SonarQube, scanners and gh replaying recorded output, JUnit XML that Surefire, pytest and Node wrote for the samples (passing, failing, erroring, skipped and flaky), both stores, the collect and sign split, verification against openssl, the step summaries (one line of facts per type, and Markdown escaped where squads wrote the text), the sign log's steps with Vault and a refused login, GitHub's attestation verified, absent or not verifying, the repository snapshot and its github-sts token, and `evidence.yml`: its shape, one type per call, the attest job, and its subject, scanner and parameter steps run with bash.
 - `provenance-attestation` with the real gh 2.102.0, in the runner image through `cli.py collect`, on 2026-11-18: `pass` on GitHub CLI's own release archive, whose attestation GitHub keeps publicly, and `fail` on the hello-maven jar of run 44301355733, since this repository holds none. The examples of its schema are those two predicates. GitHub's attest action itself has not run: it cannot on this repository.
 - In the runner image `ghcr.io/actions/actions-runner:2.338.2`, capped at 512Mi and 1 CPU: `install-scanners.sh`, and `collect` with the real TruffleHog and Grype on the sample app. With the work directory on a volume, as on the runners, the cold `sca` run wrote 3.3 GB there and 196 KB to the container itself. At 384Mi it was OOM-killed.
 - Against a local `vault server -dev`: `bootstrap.sh` and `apply.sh` with the new roles, JWT login with GitHub-shaped tokens, signing with PKCS#1 v1.5 and PSS, `verify`, openssl, and every refusal: another workflow or branch, a GitHub-hosted runner, the wrong audience, a scan token using the self key, exporting a key.
 - The samples end to end, on 2026-11-17: each built and tested with its real toolchain, then `collect` in the runner image with the real TruffleHog and Grype on the jar and the bundles, then `sign` through a local Vault set up by `bootstrap.sh` and `apply.sh` with the build family, then `verify` and openssl: 12 envelopes, each with its family's key. The squad's own workflow was refused a token, and a jar changed by one byte matched none of its evidence. The Maven jar is reproducible: the same SHA-256 from two different builds, and from the runner.
 
 On the Talos runners: `ci` passed on `gha-runner-scale-set-lab` in `rg-talos-lab` on 2026-11-16, so the runner group admits this repository, and `demo` collected all four types at 512Mi on 2026-11-17 before Vault refused its branch. The `hello-*` workflows first ran on 2026-11-17 (PR #3): `setup-java` and `setup-python` worked and the Maven and Python builds passed, `setup-node` failed for Node 26 (the image lacks `libatomic.so.1`, so the sample now uses Node 24), and TruffleHog's two processes got both collect runners OOM-killed (the collector now passes `--local-dev`). The second push the same day (commit e087073, runs 44203875582, 44203875573 and 44203875527) built, collected and signed all three samples on the runners: 12 envelopes, signed by Vault Transit with the scan and build keys. Their `verify` jobs failed only because `trusted-keys/evd-build-lab-v1.pub.pem` was not committed yet: `bootstrap.sh` had written it outside the worktree. With that file, all 12 verify, and openssl agrees.
+
+## Evidence about the repository's controls
+
+`repository-controls` is evidence about each release, built from the repository snapshot that [`docs/repository-snapshot.md`](docs/repository-snapshot.md) describes: one reusable workflow, `repository-snapshot.yml`, is the only one github-sts gives a token to read a repository's controls. `evidence.yml`'s `read-controls` job calls it, and collect downloads the snapshot by the artifact id that workflow outputs. The collector checks nine minimums: a pull request with at least one approval, stale approvals dismissed, the last pusher unable to approve, no force push, no deletion, no bypass, workflows unable to approve pull requests, and a read-only workflow token by default. A check passes when the branch rules or classic branch protection hold it, and is unknown when GitHub would not show them; anything short of nine passes is a `fail`. The predicate also counts who had access and keeps the whole snapshot, pinned by its SHA-256, so an auditor can sample who could change the code at release time. Signed with the scan key: the platform read these facts itself.
 
 ## Differences from the bank kit
 

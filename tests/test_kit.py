@@ -1047,6 +1047,88 @@ class ProvenanceAttestationTest(FileStore):
         self.assertIn("gh verified the attestations but listed none", output)
 
 
+class RepositoryControlsTest(FileStore):
+    """The repository's controls, from the snapshot read-controls took, checked and signed with the scan key."""
+
+    TYPES = "repository-controls"
+    CONTROLS = Path(__file__).resolve().parent / "controls"
+
+    def collect_controls(self, snapshot):
+        return self.collect(self.TYPES, f"controls-snapshot={snapshot}")
+
+    def test_a_protected_branch_passes_every_check(self):
+        code, output, _ = self.collect_controls(self.CONTROLS / "protected.json")
+        self.assertEqual(code, 0, output)
+        predicate = self.collected("repository-controls")
+        self.assertEqual((predicate["result"], predicate["summary"]), ("pass", {"passed": 9, "failed": 0, "unknown": 0}))
+        self.assertEqual((predicate["repository"], predicate["branch"], predicate["commit"]), (REPO, "main", SHA))
+        raw = (self.CONTROLS / "protected.json").read_bytes()
+        # The snapshot itself is kept, pinned by its SHA-256: who had access and which rules held, at release time.
+        self.assertEqual(predicate["snapshot"]["sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(predicate["snapshot"]["controls"], json.loads(raw))
+        self.assertEqual(predicate["access"], {"roles": {"admin": 1, "maintain": 1, "write": 1, "triage": 0, "read": 0},
+                                               "outsideWriters": 1, "organizationOwners": 1, "writeDeployKeys": 1,
+                                               "invitations": 1})
+
+    def test_controls_github_will_not_show_are_unknown_and_count_as_missing(self):
+        """What this lab's repository shows: private on the Free plan, with workflows allowed to approve."""
+        code, output, _ = self.collect_controls(self.CONTROLS / "private-free.json")
+        self.assertEqual(code, 0, output)
+        predicate = self.collected("repository-controls")
+        self.assertEqual((predicate["result"], predicate["summary"]), ("fail", {"passed": 1, "failed": 1, "unknown": 7}))
+        results = {check["id"]: check["result"] for check in predicate["checks"]}
+        self.assertEqual((results["pull-request-required"], results["no-bypass"]), ("unknown", "unknown"))
+        self.assertEqual((results["workflows-cannot-approve"], results["workflow-token-read-only"]), ("fail", "pass"))
+        self.assertEqual(predicate["unavailable"], ["branch_protection", "rules.branch", "rules.rulesets"])
+
+    def test_classic_branch_protection_counts_too(self):
+        snapshot = json.loads((self.CONTROLS / "private-free.json").read_text())
+        snapshot["rules"] = {"branch": [], "rulesets": []}
+        snapshot["actions"]["workflow"]["can_approve_pull_request_reviews"] = False
+        snapshot["branch_protection"] = {
+            "allow_deletions": {"enabled": False}, "allow_force_pushes": {"enabled": False},
+            "enforce_admins": {"enabled": True},
+            "required_pull_request_reviews": {"dismiss_stale_reviews": True, "require_last_push_approval": True,
+                                              "required_approving_review_count": 2}}
+        path = self.tmp / "classic.json"
+        path.write_text(json.dumps(snapshot))
+        code, output, _ = self.collect_controls(path)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.collected("repository-controls")["result"], "pass")
+
+        # An administrator who may bypass, or a pull request rule anyone may skip, is a missing control.
+        snapshot["branch_protection"]["enforce_admins"] = {"enabled": False}
+        path.write_text(json.dumps(snapshot))
+        self.collect_controls(path)
+        results = {check["id"]: check["result"] for check in self.collected("repository-controls")["checks"]}
+        self.assertEqual(results["no-bypass"], "fail")
+
+    def test_a_snapshot_it_cannot_trust_is_an_error_not_a_fail(self):
+        other = json.loads((self.CONTROLS / "protected.json").read_text())
+        other["repository"] = "evil/other"
+        (self.tmp / "other.json").write_text(json.dumps(other))
+        (self.tmp / "not-a-snapshot.json").write_text('{"format": "something/v9"}')
+        for path, message in ((self.tmp / "missing.json", "cannot be read"),
+                              (self.tmp / "not-a-snapshot.json", "is not a repository-controls/v1 snapshot"),
+                              (self.tmp / "other.json", f"the snapshot is of evil/other, not of {REPO}")):
+            with self.subTest(message):
+                code, output, _ = self.collect_controls(path)
+                self.assertEqual(code, 1, output)
+                self.assertIn(message, output)
+                self.assertFalse((self.out / "repository-controls.json").exists())
+
+    def test_the_controls_are_signed_with_the_scan_key(self):
+        code, output, _ = self.collect_controls(self.CONTROLS / "private-free.json")
+        self.assertEqual(code, 0, output)
+        code, output, _ = self.sign()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.envelope("repository-controls")["signatures"][0]["keyid"], "evd-scan-prod-v3")
+        code, output, _ = self.verify("--subject-sha256", SUBJECT_SHA, "--types", self.TYPES)
+        self.assertEqual(code, 0, output)
+        self.assertIn("✅ repository-controls v1: verified · 🔴 fail · 🛡️ 1 of 9 controls in place: 1 failed, 7 unknown"
+                      " · 1 admin, 1 outside writer · signed by evd-scan-prod-v3", output)
+
+
 class VerificationTest(unittest.TestCase):
     """The kit's own RSA verifier agrees with openssl."""
 
@@ -1114,6 +1196,9 @@ class DisplayTest(unittest.TestCase):
             "provenance-attestation/v1/examples/gh-release.json":
                 "🪪 1 GitHub attestation verified: signed by deployment.yml on refs/heads/trunk, logged by rekor.sigstore.dev",
             "provenance-attestation/v1/examples/private-repository.json": "🪪 GitHub holds no attestation for these bytes",
+            "repository-controls/v1/examples/pass.json": "🛡️ 9 of 9 controls in place · 1 admin, 1 outside writer",
+            "repository-controls/v1/examples/fail-private-free.json":
+                "🛡️ 1 of 9 controls in place: 1 failed, 7 unknown · 1 admin, 1 outside writer",
         }
         for example, line in expected.items():
             with self.subTest(example):
@@ -1211,7 +1296,7 @@ class WorkflowTest(unittest.TestCase):
 
     def test_no_job_that_runs_a_collector_can_request_an_id_token(self):
         jobs = self.jobs()
-        self.assertEqual(sorted(jobs), ["attest", "collect", "sign"])
+        self.assertEqual(sorted(jobs), ["attest", "collect", "read-controls", "sign"])
         self.assertNotIn("id-token", jobs["collect"])
         self.assertIn("id-token: write", jobs["sign"])
         self.assertIn("needs: collect", jobs["sign"])
@@ -1226,13 +1311,27 @@ class WorkflowTest(unittest.TestCase):
                       jobs["attest"])
         for kit in ("cli.py", "install-scanners", ".evidence-kit", "actions/checkout"):
             self.assertNotIn(kit, jobs["attest"])
+        # read-controls calls repository-snapshot.yml, the one workflow github-sts gives a token to read the
+        # controls (tests/test_snapshot.py checks that), and passes it nothing of the caller's.
+        self.assertIn("uses: ./.github/workflows/repository-snapshot.yml", jobs["read-controls"])
+        self.assertIn("id-token: write", jobs["read-controls"])
+        self.assertIn("if: inputs.type == 'repository-controls'", jobs["read-controls"])
+        for other in ("params", "source-artifact", "subject-artifact", "check:"):
+            self.assertNotIn(other, jobs["read-controls"])
 
     def test_collect_waits_for_the_attestation_and_sign_for_collect(self):
         jobs = self.jobs()
-        self.assertIn("needs: attest", jobs["collect"])
-        self.assertIn("if: ${{ !cancelled() && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}",
-                      jobs["collect"])
+        self.assertIn("needs: [attest, read-controls]", jobs["collect"])
+        for job in ("attest", "read-controls"):
+            self.assertIn(f"(needs.{job}.result == 'success' || needs.{job}.result == 'skipped')", jobs["collect"])
         self.assertIn("attestations: read", jobs["collect"])
+        # The snapshot, like the predicate, travels by the id its own upload returned, never by name.
+        reusable = (self.WORKFLOWS / "repository-snapshot.yml").read_text()
+        self.assertIn("value: ${{ jobs.snapshot.outputs.snapshot-id }}", reusable)
+        self.assertIn("snapshot-id: ${{ steps.hand-off.outputs.artifact-id }}", reusable)
+        download = self.step("collect", "📸 Download the controls snapshot")
+        self.assertIn("artifact-ids: ${{ needs.read-controls.outputs.snapshot-id }}", download)
+        self.assertNotIn("name:", download)
 
     def test_github_attests_the_file_the_platform_hashed(self):
         subject = self.runner_temp / "subject"
@@ -1399,10 +1498,16 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertIn("attested-file=/work/subject/app.jar", args)
         self.assertIn("attestation-signer=Depthmark-Lab/test-evidences/.github/workflows/evidence.yml", args)
-        for param in ("attested-file=/tmp/other.jar", "attestation-signer=squad/repo/.github/workflows/own.yml"):
+        for param in ("attested-file=/tmp/other.jar", "attestation-signer=squad/repo/.github/workflows/own.yml",
+                      "controls-snapshot=/tmp/made-up.json"):
             code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_PARAMS": param})
             self.assertEqual((code, args), (1, None), output)
             self.assertIn(f"{param.split('=')[0]} is set by evidence.yml, not by the caller", output)
+
+        # repository-controls reads the snapshot read-controls took, where collect downloaded it.
+        code, output, _, args = self.run_step("collect", "🔎 Collect", **{**step, "EVD_IN_TYPE": "repository-controls"})
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"controls-snapshot={self.runner_temp}/controls/repository-controls.json", args)
 
     def test_the_installed_scanners_are_the_recorded_ones(self):
         script = (REPO_ROOT / "scripts" / "install-scanners.sh").read_text()

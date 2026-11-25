@@ -1,0 +1,49 @@
+# This repository's controls, snapshot every day with scripts/snapshot-repository.py:
+# its settings, the rules on main and their rulesets, what workflows may do, who
+# has access and how, deploy keys, and who may approve deployments. The token
+# comes from the dev broker's test-controls-read-app pool: read only, granted by
+# .github/sts/test-controls-read-app/repository-controls.sts.yaml to this
+# workflow on main, and revoked as soon as the snapshot is taken.
+#
+# With controls/repository-controls.json committed, the job fails when the live
+# controls differ from it, and its summary shows the difference. Without it, the
+# job uploads the snapshot, to review and commit as the declared state.
+name: repository-controls
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  snapshot:
+    runs-on: [self-hosted, talos, lab]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: 📥 Check out the script and the declared controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 📸 Snapshot this repository's controls
+        run: |
+          set -euo pipefail
+          args=(--sts-url https://github-sts-dev.adelisle.com --sts-app test-controls-read-app
+                --sts-identity repository-controls --out "$RUNNER_TEMP/repository-controls.json")
+          if [ -f controls/repository-controls.json ]; then
+            args+=(--check controls/repository-controls.json)
+          fi
+          python3 scripts/snapshot-repository.py "${args[@]}"
+
+      - name: 📤 Upload the snapshot
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: repository-controls
+          path: ${{ runner.temp }}/repository-controls.json
+          if-no-files-found: ignore

@@ -80,6 +80,16 @@ def facts(type_id, predicate):
                                              for t in found[0]["timestamps"]))
             return (f"🪪 {plural(len(found), 'GitHub attestation')} verified: signed by {signer} on {ref}"
                     f"{' for ' + config if config and config != signer else ''}{', logged by ' + logged if logged else ''}")
+        if type_id == "repository-controls":
+            missing = counted(summary, ("failed", "unknown"))
+            access = predicate["access"]
+            who = []
+            if access["roles"] is not None:
+                who.append(plural(access["roles"]["admin"], "admin"))
+            if access["outsideWriters"]:
+                who.append(plural(access["outsideWriters"], "outside writer"))
+            return (f"🛡️ {summary['passed']} of {len(predicate['checks'])} controls in place"
+                    f"{': ' + missing if missing else ''}{' · ' + ', '.join(who) if who else ''}")
         if type_id == "peer-approval":
             if not predicate["pullRequest"]:
                 return "👥 no pull request for this commit"
