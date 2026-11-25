@@ -4,6 +4,7 @@
   "peer-approval/v1": "80baf17e943788b9b205d3bb9fed6f51e8f1c6099ecf35a24d47f3d45b0718b7",
   "provenance-attestation/v1": "9f2561f1808fcd5e3a294f4d0f28f0587a68e707a5cdabdc55e275158541d056",
   "provenance/v1": "879ffb65cede3ac7a1a2eb1892632df2145e877ca00abcd09ff567e9b2fd0f8d",
+  "repository-controls/v1": "872c577f090d9ff19105506b06dc2fc2fa01c5740b122aeb63579f8f919f8650",
   "sca/v1": "7040534aa8a880d8227543f6fb12c94246f50b462453a575bf5517b4dbc31ccc",
   "sca/v2": "701a106267f35b7d892f4b477a5de0b42acddcd9c62ef5cd495fbc1bc8f70c03",
   "secret-detection/v1": "2d4b16e4b6dba5a6eb53dc715d35257494f9d1c6dfe24a8fddb9fbee13e6fb9e",

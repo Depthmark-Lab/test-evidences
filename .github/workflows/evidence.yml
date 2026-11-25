@@ -6,10 +6,13 @@
 #
 # Vault's evidence-<family>-lab roles trust this file by job_workflow_ref, so
 # only a job of this workflow can sign. It runs in two jobs, three for
-# provenance-attestation:
-#   attest   provenance-attestation only: has GitHub attest the artifact's build
-#            provenance with Sigstore, under this workflow's identity. It runs
-#            GitHub's attest action and nothing else.
+# provenance-attestation and repository-controls:
+#   attest         provenance-attestation only: has GitHub attest the artifact's
+#                  build provenance with Sigstore, under this workflow's identity.
+#                  It runs GitHub's attest action and nothing else.
+#   read-controls  repository-controls only: calls repository-snapshot.yml, the
+#                  one workflow github-sts gives a token to read the repository's
+#                  controls, and hands collect the snapshot.
 #   collect  runs the collector and its scanner, without id-token permission,
 #            so nothing it runs can request a signing token.
 #   sign     checks the predicate again and signs it with Vault Transit, which
@@ -140,12 +143,28 @@ jobs:
           subject-name: ${{ inputs.subject-repo-path }}
           subject-digest: sha256:${{ steps.subject.outputs.sha256 }}
 
+  read-controls:
+    name: 📸 Read the repository's controls
+    # repository-snapshot.yml is the only workflow github-sts gives a token to read them.
+    # Called from here, the token still goes to its job alone; collect gets the snapshot.
+    if: inputs.type == 'repository-controls'
+    uses: ./.github/workflows/repository-snapshot.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      artifact-name: evidence-controls-${{ inputs.type }}
+      runs-on: ${{ inputs.runs-on }}
+
   collect:
     name: 🔎 Collect
-    needs: attest
-    # attest runs for provenance-attestation only and is skipped otherwise. When it fails,
-    # there is no attestation to verify.
-    if: ${{ !cancelled() && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}
+    needs: [attest, read-controls]
+    # attest and read-controls run for one type each and are skipped otherwise. When one
+    # of them fails, there is nothing to collect from.
+    if: >-
+      ${{ !cancelled()
+      && (needs.attest.result == 'success' || needs.attest.result == 'skipped')
+      && (needs.read-controls.result == 'success' || needs.read-controls.result == 'skipped') }}
     runs-on: ${{ fromJSON(inputs.runs-on) }}
     timeout-minutes: 30
     permissions:
@@ -192,6 +211,14 @@ jobs:
         with:
           name: ${{ inputs.reports-artifact }}
           path: ${{ runner.temp }}/reports
+
+      # By the id read-controls' own upload returned, never by name, as sign takes the predicate.
+      - name: 📸 Download the controls snapshot
+        if: inputs.type == 'repository-controls'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.read-controls.outputs.snapshot-id }}
+          path: ${{ runner.temp }}/controls
 
       - name: 🎯 Pin the subject
         id: subject
@@ -295,10 +322,11 @@ jobs:
           while IFS= read -r line; do
             if [ -n "${line//[[:space:]]/}" ]; then args+=(--param "$line"); fi
           done <<<"$EVD_IN_PARAMS"
-          # This workflow says where the artifact and the reports are, and who must have attested,
-          # never the caller: test-results must read what the build uploaded, not files from the
-          # repository, and provenance-attestation must hold GitHub's attestation to this workflow.
-          for name in test-reports attested-file attestation-signer; do
+          # This workflow says where the artifact, the reports and the snapshot are, and who must
+          # have attested, never the caller: test-results must read what the build uploaded, not
+          # files from the repository, provenance-attestation must hold GitHub's attestation to
+          # this workflow, and repository-controls must read what read-controls took.
+          for name in test-reports attested-file attestation-signer controls-snapshot; do
             if grep -q "^[[:space:]]*${name}[[:space:]]*=" <<<"$EVD_IN_PARAMS"; then
               echo "::error::$name is set by evidence.yml, not by the caller"
               exit 1
@@ -318,6 +346,9 @@ jobs:
           if [ "$EVD_IN_TYPE" = provenance-attestation ]; then
             args+=(--param "attested-file=$EVD_IN_SUBJECT_FILE"
                    --param "attestation-signer=Depthmark-Lab/test-evidences/.github/workflows/evidence.yml")
+          fi
+          if [ "$EVD_IN_TYPE" = repository-controls ]; then
+            args+=(--param "controls-snapshot=$RUNNER_TEMP/controls/repository-controls.json")
           fi
           echo "::group::🔧 What collect was asked for"
           printf '%s\n' "${args[@]}"

@@ -64,6 +64,14 @@
       "attestation-signer": {"required": true, "description": "<owner>/<repo>/.github/workflows/<file> that must have signed the attestation. evidence.yml sets it to itself"}
     }
   },
+  "repository-controls": {
+    "description": "What protects the branch the artifact comes from and who could change it, read from a snapshot of the repository's controls and checked against the platform's minimums",
+    "family": "scan",
+    "current": "v1",
+    "params": {
+      "controls-snapshot": {"required": true, "description": "The snapshot scripts/snapshot-repository.py wrote. evidence.yml sets it from its read-controls job"}
+    }
+  },
   "custom": {
     "description": "Anything a squad wants to declare itself. Signed with the self key, never platform-verified",
     "family": "self",

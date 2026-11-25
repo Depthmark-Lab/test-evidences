@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "repository-controls v1",
+  "description": "What protects the branch an artifact comes from and who could change it: a snapshot of the repository's controls (scripts/snapshot-repository.py), the platform's minimums checked against it, and who had access",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["result", "commit", "repository", "branch", "summary", "checks", "access", "unavailable", "snapshot"],
+  "properties": {
+    "result": {"enum": ["pass", "fail"], "description": "pass only when every check passes: a control that cannot be shown counts as not in place"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"},
+    "branch": {"type": "string", "minLength": 1, "description": "The branch whose rules were read: the repository's default branch"},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "failed", "unknown"],
+      "properties": {
+        "passed": {"type": "integer"},
+        "failed": {"type": "integer"},
+        "unknown": {"type": "integer"}
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "result"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+          "title": {"type": "string", "minLength": 1},
+          "result": {"enum": ["pass", "fail", "unknown"], "description": "unknown when GitHub would not show what the check needs"}
+        }
+      }
+    },
+    "access": {
+      "type": "object",
+      "description": "Who could change the code, counted from the snapshot. null where GitHub would not show it",
+      "additionalProperties": false,
+      "required": ["roles", "outsideWriters", "organizationOwners", "writeDeployKeys", "invitations"],
+      "properties": {
+        "roles": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "admin": {"type": "integer"},
+            "maintain": {"type": "integer"},
+            "write": {"type": "integer"},
+            "triage": {"type": "integer"},
+            "read": {"type": "integer"}
+          }
+        },
+        "outsideWriters": {"type": ["integer", "null"], "description": "Outside collaborators with write, maintain or admin"},
+        "organizationOwners": {"type": ["integer", "null"]},
+        "writeDeployKeys": {"type": ["integer", "null"]},
+        "invitations": {"type": ["integer", "null"], "description": "Access granted, not yet accepted"}
+      }
+    },
+    "unavailable": {
+      "type": "array",
+      "description": "The parts of the snapshot GitHub would not show",
+      "items": {"type": "string"}
+    },
+    "snapshot": {
+      "type": "object",
+      "description": "The snapshot itself, so the evidence keeps every rule and everyone with access at release time",
+      "additionalProperties": false,
+      "required": ["file", "sha256", "controls"],
+      "properties": {
+        "file": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the snapshot file as read"},
+        "controls": {"type": "object", "required": ["format", "repository", "branch"], "properties": {
+          "format": {"const": "repository-controls/v1"}
+        }}
+      }
+    }
+  }
+}

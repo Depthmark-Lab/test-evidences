@@ -89,7 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        type: [secret-detection, sca, test-results, provenance, provenance-attestation]
+        type: [secret-detection, sca, test-results, provenance, provenance-attestation, repository-controls]
     uses: ./.github/workflows/evidence.yml
     # attestations: write for evidence.yml's attest job, which provenance-attestation runs. GitHub
     # checks a called workflow's permissions before any job runs, so every caller grants it.
@@ -139,5 +139,5 @@ jobs:
           sha256=$(sha256sum "$RUNNER_TEMP/artifact/hello-maven.jar" | cut -d' ' -f1)
           echo "🔒 SHA-256 of the jar, computed by the consumer: $sha256"
           python3 evidence/cli.py verify --envelopes "$RUNNER_TEMP/envelopes" --keys trusted-keys \
-            --subject-sha256 "$sha256" --types secret-detection,sca,test-results,provenance,provenance-attestation
-          echo "::notice title=✅ hello-maven.jar verified::5 signed statements about sha256 $sha256 hold with the trusted public keys"
+            --subject-sha256 "$sha256" --types secret-detection,sca,test-results,provenance,provenance-attestation,repository-controls
+          echo "::notice title=✅ hello-maven.jar verified::6 signed statements about sha256 $sha256 hold with the trusted public keys"

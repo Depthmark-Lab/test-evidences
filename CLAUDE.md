@@ -41,6 +41,7 @@ When you add or change code, keep it on its side. If evidence logic seems to nee
 | Vault roles and policies | homelab repository, `vault/jwt/evidence-{scan,approval,self,build}-lab/`, applied by the user with `vault/apply.sh` |
 | Transit mount and keys | homelab repository, `vault/transit-evidence/bootstrap.sh`, run once by the user; it also exports the public keys |
 | Trusted public keys | `trusted-keys/` here, written by that script and committed |
+| Repository snapshot | `scripts/snapshot-repository.py`, the reusable `repository-snapshot.yml` and the identity under `.github/sts/test-controls-read-app/`: see [`docs/repository-snapshot.md`](docs/repository-snapshot.md) |
 | Runners | homelab repository, `talos/apps/action-runner-controller-dev/gha-runner-scale-set-lab/`: labels `self-hosted, talos, linux, lab`, runner group `rg-talos-lab`. `lab-k8s` shares the first three labels, so always include `lab` |
 | Scanners | `scripts/install-scanners.sh`, pinned by version and SHA-256, no root needed: TruffleHog, Grype and gh, which verifies GitHub's attestations. It installs both scanners, or only the tools named |
 | Sample squads | `samples/hello-{maven,python,node}`, built by `.github/workflows/hello-*.yml` with their own toolchains: Temurin 25 and the Maven wrapper, Python 3.14, Node 24. JUnit XML they wrote is recorded in `tests/reports/` |
@@ -63,7 +64,7 @@ Disk: only `/home/runner/_work` is a volume (openebs hostpath, no quota). Everyt
 
 ```
 python3 evidence/cli.py check                 # catalog, schemas, examples, lock, store and layering agree
-python3 -m unittest discover -s tests -v      # 91 tests against stand-in services, needs openssl and bash
+python3 -m unittest discover -s tests -v      # 100 tests against stand-in services, needs openssl and bash
 python3 evidence/cli.py list                  # evidence types and their parameters
 python3 evidence/cli.py collect --types sca --out /tmp/predicates     # no Vault, no JFrog
 python3 evidence/cli.py verify --envelopes /tmp/envelopes --keys trusted-keys

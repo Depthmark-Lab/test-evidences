@@ -1,0 +1,282 @@
+{
+  "access": {
+    "invitations": 1,
+    "organizationOwners": 1,
+    "outsideWriters": 1,
+    "roles": {
+      "admin": 1,
+      "maintain": 1,
+      "read": 0,
+      "triage": 0,
+      "write": 1
+    },
+    "writeDeployKeys": 1
+  },
+  "branch": "main",
+  "checks": [
+    {
+      "id": "pull-request-required",
+      "result": "pass",
+      "title": "Changes reach the branch through a pull request"
+    },
+    {
+      "id": "one-approval",
+      "result": "pass",
+      "title": "A pull request needs at least one approval"
+    },
+    {
+      "id": "stale-approvals-dismissed",
+      "result": "pass",
+      "title": "A new commit dismisses the approvals given before it"
+    },
+    {
+      "id": "last-pusher-cannot-approve",
+      "result": "pass",
+      "title": "Whoever pushed last cannot approve"
+    },
+    {
+      "id": "no-force-push",
+      "result": "pass",
+      "title": "The branch's history cannot be rewritten"
+    },
+    {
+      "id": "no-deletion",
+      "result": "pass",
+      "title": "The branch cannot be deleted"
+    },
+    {
+      "id": "no-bypass",
+      "result": "pass",
+      "title": "Nobody can bypass the rules, administrators included"
+    },
+    {
+      "id": "workflows-cannot-approve",
+      "result": "pass",
+      "title": "Workflows cannot approve pull requests"
+    },
+    {
+      "id": "workflow-token-read-only",
+      "result": "pass",
+      "title": "A workflow's token is read-only unless the workflow asks for more"
+    }
+  ],
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "repository": "acme-bank/payments",
+  "result": "pass",
+  "snapshot": {
+    "controls": {
+      "access": {
+        "collaborators": [
+          {
+            "id": 1,
+            "login": "alice",
+            "role": "admin",
+            "type": "User",
+            "via": "team or organization"
+          },
+          {
+            "id": 2,
+            "login": "bob",
+            "role": "maintain",
+            "type": "User",
+            "via": "direct"
+          },
+          {
+            "id": 3,
+            "login": "carol",
+            "role": "write",
+            "type": "User",
+            "via": "outside"
+          }
+        ],
+        "deploy_keys": [
+          {
+            "created_at": "2026-10-01T00:00:00Z",
+            "fingerprint": "SHA256:xqtMidCWJTJjUoWXvfkA+Qa9lyTgf27nCSHI3iSqpqU",
+            "id": 11,
+            "read_only": false,
+            "title": "deploy"
+          }
+        ],
+        "invitations": [
+          {
+            "id": 3,
+            "invitee": "dave",
+            "permissions": "write"
+          }
+        ],
+        "organization_owners": [
+          "olivia"
+        ],
+        "teams": [
+          {
+            "id": 7,
+            "permission": "push",
+            "slug": "payments-devs"
+          }
+        ]
+      },
+      "actions": {
+        "permissions": {
+          "allowed_actions": "selected",
+          "enabled": true
+        },
+        "selectedActions": {
+          "github_owned_allowed": true,
+          "patterns_allowed": [
+            "acme-bank/*"
+          ],
+          "verified_allowed": false
+        },
+        "workflow": {
+          "can_approve_pull_request_reviews": false,
+          "default_workflow_permissions": "read"
+        }
+      },
+      "branch": "main",
+      "branch_protection": {
+        "protected": false
+      },
+      "environments": [
+        {
+          "can_admins_bypass": false,
+          "deployment_branch_policy": {
+            "custom_branch_policies": false,
+            "protected_branches": true
+          },
+          "name": "production",
+          "protection_rules": [
+            {
+              "prevent_self_review": true,
+              "reviewers": [
+                {
+                  "name": "release-managers",
+                  "type": "Team"
+                },
+                {
+                  "name": "olivia",
+                  "type": "User"
+                }
+              ],
+              "type": "required_reviewers"
+            },
+            {
+              "type": "wait_timer",
+              "wait_timer": 5
+            }
+          ]
+        }
+      ],
+      "format": "repository-controls/v1",
+      "repository": "acme-bank/payments",
+      "rules": {
+        "branch": [
+          {
+            "ruleset_id": 42,
+            "ruleset_source": "acme-bank/payments",
+            "ruleset_source_type": "Repository",
+            "type": "deletion"
+          },
+          {
+            "ruleset_id": 42,
+            "ruleset_source": "acme-bank/payments",
+            "ruleset_source_type": "Repository",
+            "type": "non_fast_forward"
+          },
+          {
+            "parameters": {
+              "dismiss_stale_reviews_on_push": true,
+              "require_code_owner_review": true,
+              "require_last_push_approval": true,
+              "required_approving_review_count": 1,
+              "required_review_thread_resolution": true
+            },
+            "ruleset_id": 42,
+            "ruleset_source": "acme-bank/payments",
+            "ruleset_source_type": "Repository",
+            "type": "pull_request"
+          },
+          {
+            "parameters": {
+              "required_status_checks": [
+                {
+                  "context": "verify",
+                  "integration_id": 15368
+                }
+              ],
+              "strict_required_status_checks_policy": true
+            },
+            "ruleset_id": 42,
+            "ruleset_source": "acme-bank/payments",
+            "ruleset_source_type": "Repository",
+            "type": "required_status_checks"
+          }
+        ],
+        "rulesets": [
+          {
+            "bypass_actors": [],
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "created_at": "2026-11-01T00:00:00Z",
+            "enforcement": "active",
+            "id": 42,
+            "name": "main-change-control",
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "parameters": {
+                  "dismiss_stale_reviews_on_push": true,
+                  "require_code_owner_review": true,
+                  "require_last_push_approval": true,
+                  "required_approving_review_count": 1,
+                  "required_review_thread_resolution": true
+                },
+                "type": "pull_request"
+              }
+            ],
+            "source": "acme-bank/payments",
+            "source_type": "Repository",
+            "target": "branch"
+          }
+        ]
+      },
+      "settings": {
+        "allow_auto_merge": false,
+        "allow_forking": null,
+        "allow_merge_commit": false,
+        "allow_rebase_merge": false,
+        "allow_squash_merge": true,
+        "allow_update_branch": null,
+        "archived": false,
+        "default_branch": "main",
+        "delete_branch_on_merge": true,
+        "full_name": "acme-bank/payments",
+        "id": 1,
+        "owner_type": "Organization",
+        "private": true,
+        "security_and_analysis": null,
+        "visibility": "private",
+        "web_commit_signoff_required": null
+      }
+    },
+    "file": "protected.json",
+    "sha256": "6632642ad0a9438aca159618cdf072cad6b184e781895c24f8299ba14f55a381"
+  },
+  "summary": {
+    "failed": 0,
+    "passed": 9,
+    "unknown": 0
+  },
+  "unavailable": []
+}
